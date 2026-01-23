@@ -16,8 +16,6 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
 // @run-at       document-end
-// @downloadURL https://update.greasyfork.org/scripts/557605/ChatGPT%20to%20Notion%20Exporter.user.js
-// @updateURL https://update.greasyfork.org/scripts/557605/ChatGPT%20to%20Notion%20Exporter.meta.js
 // ==/UserScript==
 
 (function () {
