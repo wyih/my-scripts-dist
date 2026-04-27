@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.17
+// @version      2.20
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.13] script loaded');
+    console.log('[ChatGPT→Notion v2.20] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -274,33 +274,225 @@
         "abap", "arduino", "bash", "basic", "c", "clojure", "coffeescript", "c++", "c#", "css", "dart", "diff", "docker", "elixir", "elm", "erlang", "flow", "fortran", "f#", "gherkin", "glsl", "go", "graphql", "groovy", "haskell", "html", "java", "javascript", "json", "julia", "kotlin", "latex", "less", "lisp", "livescript", "lua", "makefile", "markdown", "markup", "matlab", "mermaid", "nix", "objective-c", "ocaml", "pascal", "perl", "php", "plain text", "powershell", "prolog", "protobuf", "python", "r", "reason", "ruby", "rust", "sass", "scala", "scheme", "scss", "shell", "solidity", "sql", "swift", "typescript", "vb.net", "verilog", "vhdl", "visual basic", "webassembly", "xml", "yaml", "java/c/c++/c#"
     ]);
 
+    const LANGUAGE_ALIASES = {
+        js: "javascript",
+        jsx: "javascript",
+        mjs: "javascript",
+        node: "javascript",
+        nodejs: "javascript",
+        py: "python",
+        python3: "python",
+        ts: "typescript",
+        tsx: "typescript",
+        sh: "bash",
+        zsh: "bash",
+        fish: "bash",
+        shellscript: "bash",
+        "shell-session": "bash",
+        console: "bash",
+        terminal: "bash",
+        yml: "yaml",
+        md: "markdown",
+        markdown: "markdown",
+        plaintext: "plain text",
+        text: "plain text",
+        none: "plain text",
+        ps: "powershell",
+        ps1: "powershell",
+        csharp: "c#",
+        cpp: "c++",
+        cplusplus: "c++",
+        objc: "objective-c"
+    };
+
     function mapLanguageToNotion(lang) {
         if (!lang) return "plain text";
-        lang = lang.toLowerCase().trim();
-        if (lang === "js") return "javascript";
-        if (lang === "py") return "python";
-        if (lang === "ts") return "typescript";
-        if (lang === "sh") return "shell";
-        if (lang === "cpp") return "c++";
-        if (lang === "cs") return "c#";
+        lang = String(lang).toLowerCase().trim();
+        lang = lang.replace(/^[`'"]+|[`'"]+$/g, '').replace(/\s+/g, ' ');
+        if (LANGUAGE_ALIASES[lang]) return LANGUAGE_ALIASES[lang];
         if (NOTION_LANGUAGES.has(lang)) return lang;
         return "plain text";
     }
 
+    function detectLanguageFromShortText(text, allowEmbedded = true) {
+        if (!text) return null;
+        const cleaned = String(text)
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/\b(copy code|copy|copied|复制代码|复制)\b/gi, ' ')
+            .replace(/[(){}[\]|:：]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!cleaned || cleaned.length > 80) return null;
+
+        const direct = mapLanguageToNotion(cleaned);
+        if (direct !== "plain text" || cleaned.toLowerCase() === "plain text") return direct;
+        if (!allowEmbedded) return null;
+
+        const tokens = cleaned.match(/[a-zA-Z][a-zA-Z0-9+#._-]*/g) || [];
+        for (const token of tokens) {
+            const mapped = mapLanguageToNotion(token);
+            if (mapped !== "plain text") return mapped;
+        }
+        return null;
+    }
+
+    function hasCodeHeaderHint(el, text) {
+        const meta = [
+            el.className || '',
+            el.id || '',
+            el.getAttribute?.('data-testid') || '',
+            el.getAttribute?.('aria-label') || '',
+            el.getAttribute?.('title') || ''
+        ].join(' ').toLowerCase();
+        return /language|lang|header|toolbar|copy|clipboard|code-header/.test(meta) ||
+            /\b(copy code|copy|copied|复制代码|复制)\b/i.test(text || '');
+    }
+
+    function directText(el) {
+        return Array.from(el.childNodes || [])
+            .filter(node => node.nodeType === 3)
+            .map(node => node.textContent || '')
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function findCodeMirrorContent(preNode) {
+        return preNode.querySelector('.cm-content, [class*="cm-content"], #code-block-viewer .cm-content');
+    }
+
+    function readCodeMirrorText(contentEl) {
+        let output = '';
+        function walk(node) {
+            if (node.nodeType === 3) {
+                output += node.textContent || '';
+                return;
+            }
+            if (node.nodeType !== 1) return;
+            if (node.tagName === 'BR') {
+                output += '\n';
+                return;
+            }
+            node.childNodes.forEach(walk);
+        }
+        contentEl.childNodes.forEach(walk);
+        return output.replace(/\u00A0/g, ' ').replace(/[ \t]+\n/g, '\n').trim();
+    }
+
+    const CODE_LINE_TAGS = new Set(['DIV', 'P', 'LI', 'TR']);
+
+    function readCodeTextWithLineBreaks(root) {
+        let output = '';
+        function appendLineBreak() {
+            output = output.replace(/[ \t]+$/g, '');
+            if (output && !output.endsWith('\n')) output += '\n';
+        }
+        function walk(node) {
+            if (node.nodeType === 3) {
+                output += node.textContent || '';
+                return;
+            }
+            if (node.nodeType !== 1) return;
+            if (node.tagName === 'BR') {
+                appendLineBreak();
+                return;
+            }
+
+            const isLine = CODE_LINE_TAGS.has(node.tagName);
+            const before = output.length;
+            node.childNodes.forEach(walk);
+            if (isLine && output.length > before) appendLineBreak();
+        }
+        root.childNodes.forEach(walk);
+        return output.replace(/\u00A0/g, ' ').replace(/[ \t]+\n/g, '\n').trim();
+    }
+
+    function detectLanguageInCodeHeader(preNode, codeContentEl) {
+        const candidates = [];
+
+        if (codeContentEl) {
+            const elementsBeforeCode = Array.from(preNode.querySelectorAll('*')).filter(el => {
+                if (el === codeContentEl || codeContentEl.contains(el) || el.contains(codeContentEl)) return false;
+                return !!(el.compareDocumentPosition(codeContentEl) & Node.DOCUMENT_POSITION_FOLLOWING);
+            });
+            candidates.push(...elementsBeforeCode);
+        } else {
+            candidates.push(...Array.from(preNode.querySelectorAll('*')).slice(0, 40));
+        }
+
+        for (const el of candidates) {
+            if (['BUTTON', 'SVG'].includes(el.tagName)) continue;
+            const text = directText(el) || el.getAttribute('aria-label') || el.getAttribute('title') || '';
+            const lang = detectLanguageFromShortText(text, !!codeContentEl || hasCodeHeaderHint(el, text));
+            if (lang) return lang;
+        }
+        return null;
+    }
+
     function detectLanguageRecursive(preNode) {
+        const code = preNode.querySelector('code');
+        const cmContent = findCodeMirrorContent(preNode);
+        const className = code?.className || '';
+        const classMatch = className.match(/(?:^|\s)language-([a-zA-Z0-9+#._-]+)/);
+        if (classMatch) {
+            const raw = classMatch[1];
+            return mapLanguageToNotion(raw);
+        }
+
+        for (const el of [code, preNode]) {
+            if (!el) continue;
+            for (const attr of ['data-language', 'data-code-language', 'data-lang', 'lang', 'aria-label', 'title']) {
+                const lang = detectLanguageFromShortText(el.getAttribute(attr));
+                if (lang) return lang;
+            }
+        }
+
         let c = preNode;
         for (let i = 0; i < 3; i++) {
             if (!c) break;
             const h = c.previousElementSibling;
-            if (h && NOTION_LANGUAGES.has(h.innerText.toLowerCase())) return h.innerText.toLowerCase();
+            const lang = h && detectLanguageFromShortText(h.innerText || h.textContent || '');
+            if (lang) return lang;
             c = c.parentElement;
         }
-        const code = preNode.querySelector('code');
-        if (code && code.className.match(/language-([\w-]+)/)) {
-            const raw = code.className.match(/language-([\w-]+)/)[1];
-            return mapLanguageToNotion(raw);
-        }
+
+        const headerLang = detectLanguageInCodeHeader(preNode, code || cmContent);
+        if (headerLang) return headerLang;
         return "plain text";
+    }
+
+    function removeCodeHeaderLabels(root, language) {
+        if (!language || language === "plain text") return;
+        Array.from(root.querySelectorAll('*')).forEach(el => {
+            if (['BUTTON', 'SVG'].includes(el.tagName)) {
+                el.remove();
+                return;
+            }
+            const text = directText(el);
+            const lang = detectLanguageFromShortText(text, hasCodeHeaderHint(el, text));
+            if (lang === language && text.length <= 80) el.remove();
+        });
+    }
+
+    function stripLeadingLanguageLabel(text, language) {
+        if (!text || !language || language === "plain text") return text || "";
+        const escaped = language.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return text.replace(new RegExp(`^\\s*${escaped}\\s*(?:\\r?\\n|(?=[#/$>]))`, 'i'), '');
+    }
+
+    function extractCodeText(preNode, language) {
+        const code = preNode.querySelector('code');
+        if (code) return code.textContent || "";
+
+        const cmContent = findCodeMirrorContent(preNode);
+        if (cmContent) return readCodeMirrorText(cmContent);
+
+        const clone = preNode.cloneNode(true);
+        clone.querySelectorAll('button, svg, [aria-hidden="true"], .sr-only').forEach(el => el.remove());
+        removeCodeHeaderLabels(clone, language);
+
+        const text = readCodeTextWithLineBreaks(clone) || clone.innerText || clone.textContent || "";
+        return stripLeadingLanguageLabel(text, language);
     }
 
     function splitCodeSafe(code) {
@@ -326,6 +518,8 @@
             // [公式修复] 兼容新旧版 ChatGPT 结构
             let latex = null;
             if (n.nodeType === 1) {
+                if (isIgnorableChatGPTFileReference(n)) return;
+
                 // 1. 优先尝试：标准属性
                 if (n.hasAttribute('data-latex-source')) {
                     latex = n.getAttribute('data-latex-source');
@@ -371,15 +565,82 @@
                 const ns = { ...s };
                 if (['B', 'STRONG'].includes(n.tagName)) ns.bold = true;
                 if (['I', 'EM'].includes(n.tagName)) ns.italic = true;
-                if (n.tagName === 'CODE') ns.code = true;
                 if (n.tagName === 'A' && n.href && n.href.trim() !== '') {
-                    ns.link = { url: n.href };
+                    const label = getAnchorDisplayText(n);
+                    if (!label) return;
+                    for (let i = 0; i < label.length; i += MAX_TEXT_LENGTH) {
+                        rt.push({
+                            type: "text",
+                            text: { content: label.slice(i, i + MAX_TEXT_LENGTH), link: { url: n.href } },
+                            annotations: { bold: !!ns.bold, italic: !!ns.italic, code: !!ns.code, color: "default" }
+                        });
+                    }
+                    return;
                 }
+                if (n.tagName === 'SUP' && isCitationMarkerText(n.textContent || '')) return;
+                if (n.tagName === 'CODE') ns.code = true;
                 n.childNodes.forEach(c => tr(c, ns));
             }
         }
         nodes.forEach(n => tr(n));
         return rt;
+    }
+
+    function cleanCitationText(text) {
+        return String(text || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/\s+/g, ' ')
+            .replace(/\s*(?:[+＋]\s*\d+|\[\d+\])\s*$/g, '')
+            .trim();
+    }
+
+    function isCitationMarkerText(text) {
+        return /^[+＋]?\s*(?:\d+|\[\d+\])$/.test(String(text || '').trim());
+    }
+
+    function getAnchorDisplayText(anchor) {
+        const clone = anchor.cloneNode(true);
+        clone.querySelectorAll('sup, svg, [aria-hidden="true"], .sr-only').forEach(el => el.remove());
+
+        let text = cleanCitationText(clone.innerText || clone.textContent || '');
+        if (!text) text = cleanCitationText(anchor.getAttribute('title') || anchor.getAttribute('aria-label') || '');
+        if (!text) {
+            try {
+                text = new URL(anchor.href).hostname.replace(/^www\./, '');
+            } catch (e) {
+                text = anchor.href || '';
+            }
+        }
+        return text;
+    }
+
+    function normalizedText(el) {
+        return String(el?.innerText || el?.textContent || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function isChatGPTFileReferenceLabel(el) {
+        if (!el || el.nodeType !== 1) return false;
+        const classes = el.classList;
+        return el.tagName === 'P' &&
+            classes.contains('not-prose') &&
+            classes.contains('truncate') &&
+            classes.contains('flex-auto') &&
+            normalizedText(el).length > 0;
+    }
+
+    function isIgnorableChatGPTFileReference(el) {
+        if (!el || el.nodeType !== 1) return false;
+        if (isChatGPTFileReferenceLabel(el)) return true;
+
+        const label = el.querySelector?.('p.not-prose.truncate.flex-auto');
+        if (!label || !isChatGPTFileReferenceLabel(label)) return false;
+
+        const labelText = normalizedText(label);
+        const outerText = normalizedText(el);
+        return !!labelText && outerText === labelText;
     }
 
     // 2. 递归处理块级节点 (Block Equation & Structure)
@@ -449,6 +710,7 @@
 
         Array.from(nodes).forEach(n => {
             if (['SCRIPT', 'STYLE', 'SVG'].includes(n.nodeName)) return;
+            if (n.nodeType === 1 && isIgnorableChatGPTFileReference(n)) return;
 
             // [FIX] Convert tables as a single Notion table block
             if (n.nodeType === 1 && ['TABLE', 'TBODY', 'THEAD', 'TFOOT'].includes(n.nodeName)) {
@@ -527,11 +789,9 @@
                     }
                 } else if (t === 'PRE') {
                     flush();
-                    const codeEl = n.querySelector('code');
-                    const fullCode = codeEl ? codeEl.textContent : (n.textContent || "");
-
-                    if (!fullCode.trim()) return;
                     const lang = detectLanguageRecursive(n);
+                    const fullCode = extractCodeText(n, lang);
+                    if (!fullCode.trim()) return;
                     const chunks = splitCodeSafe(fullCode);
                     const rt = chunks.map(c => ({ type: "text", text: { content: c } }));
                     blocks.push({ object: "block", type: "code", code: { rich_text: rt, language: lang } });
