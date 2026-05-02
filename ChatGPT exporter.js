@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.20
+// @version      2.21
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.20] script loaded');
+    console.log('[ChatGPT→Notion v2.21] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -643,6 +643,10 @@
         return !!labelText && outerText === labelText;
     }
 
+    function removeChatGPTExportChrome(root) {
+        root.querySelectorAll('.cgpt-tool-group, [aria-label="Response actions"], button[aria-label="Sources"]').forEach(el => el.remove());
+    }
+
     // 2. 递归处理块级节点 (Block Equation & Structure)
     function processNodesToBlocks(nodes, seenImages = new Set()) {
         const blocks = [];
@@ -886,7 +890,7 @@
             });
 
             const clone = turn.cloneNode(true);
-            clone.querySelectorAll('.cgpt-tool-group').forEach(el => el.remove());
+            removeChatGPTExportChrome(clone);
 
             children.push(...processNodesToBlocks(clone.childNodes, new Set()));
             children.push({ object: "block", type: "divider", divider: {} });

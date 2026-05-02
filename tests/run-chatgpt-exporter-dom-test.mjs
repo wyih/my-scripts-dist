@@ -45,6 +45,19 @@ const sample = `<!doctype html>
     <pre><code class="language-python">print("ok")</code></pre>
     <pre><div>go test ./...</div></pre>
   </div>
+  <div class="z-0 flex min-h-[46px] justify-start">
+    <div aria-label="Response actions" class="flex flex-wrap items-center" role="group" tabindex="-1">
+      <button aria-label="Copy response" data-testid="copy-turn-action-button"><span><svg aria-hidden="true"></svg></span></button>
+      <button aria-label="Share"><span><svg aria-hidden="true"></svg></span></button>
+      <button class="group/footnote bg-token-bg-primary" aria-label="Sources" style="opacity: 1;">
+        <div>
+          <img alt="" width="32" height="32" class="icon-sm rounded-full" src="https://www.google.com/s2/favicons?domain=https://developers.openai.com&sz=32">
+          <img alt="" width="32" height="32" class="icon-sm rounded-full" src="https://www.google.com/s2/favicons?domain=https://docs.openclaw.ai&sz=32">
+        </div>
+        <div>Sources</div>
+      </button>
+    </div>
+  </div>
 </div>
 <script>
 window.__captured = [];
@@ -100,10 +113,14 @@ function plainCode(block) {
     }
 
     const allTexts = [];
+    const imageLikeBlocks = [];
     for (const block of payload.children) {
       const richText = block.paragraph?.rich_text || block.heading_3?.rich_text || block.bulleted_list_item?.rich_text || block.numbered_list_item?.rich_text || [];
       for (const item of richText) {
         if (item.text?.content) allTexts.push(item.text.content);
+      }
+      if (block.type === 'image' || richText.some(item => /图片导出失败|image\.png/.test(item.text?.content || ''))) {
+        imageLikeBlocks.push(block);
       }
     }
 
@@ -113,7 +130,8 @@ function plainCode(block) {
         text: plainCode(block)
       })),
       linkTexts,
-      allText: allTexts.join('\\n')
+      allText: allTexts.join('\\n'),
+      imageLikeBlockCount: imageLikeBlocks.length
     };
 
     const failures = [];
@@ -139,6 +157,8 @@ function plainCode(block) {
     if (!result.allText.includes('Keep this sentence after the file reference.')) {
       failures.push('text after file reference should remain');
     }
+    if (result.allText.includes('Sources')) failures.push('response action Sources button should stay out of exported text');
+    if (result.imageLikeBlockCount > 0) failures.push('response action favicons should stay out of exported images');
 
     document.body.innerHTML = '<pre id="out">' + JSON.stringify({ ok: failures.length === 0, failures, result }, null, 2)
       .replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch])) + '</pre>';
