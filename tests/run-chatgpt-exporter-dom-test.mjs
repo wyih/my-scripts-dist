@@ -12,16 +12,19 @@ const sample = `<!doctype html>
 <div data-testid="conversation-turn" data-message-author-role="assistant">
   <div class="markdown prose">
     <p>Reference <a href="https://ideas.repec.org/a/foo/bar.html"><span>IDEAS/RePEc</span><span>+5</span></a></p>
-    <p>Grouped source
-      <a class="flex overflow-hidden rounded-xl text-[9px] font-medium h-4.5 px-2 select-none" href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/"><span>SSE</span><span>+2</span><span>Neris CSRC</span><span>+2</span></a>
-      <a class="hidden" href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/extra-1">SSE</a>
-      <a class="hidden" href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/extra-2">SSE</a>
-      <a class="flex overflow-hidden rounded-xl text-[9px] font-medium h-4.5 px-2 select-none" href="https://neris.csrc.gov.cn/falvfagui/2025-main.html"><span>Neris CSRC</span><span>+1</span></a>
-      <a class="hidden" href="https://neris.csrc.gov.cn/falvfagui/2025-extra-1.html">Neris CSRC</a>
-      <a class="hidden" href="https://neris.csrc.gov.cn/falvfagui/2025-extra-2.html">Neris CSRC</a>
-      <a class="flex overflow-hidden rounded-xl text-[9px] font-medium h-4.5 px-2 select-none" href="https://www.csrc.gov.cn/csrc/c101954/c7451379/content.shtml"><span>National Cyber Security Review Center</span><span>+1</span></a>
-      <a class="hidden" href="https://www.csrc.gov.cn/csrc/c101877/c1029542/content.shtml">National Cyber Security Review Center</a>
-    </p>
+    <table>
+      <tr><th>官方出处</th></tr>
+      <tr>
+        <td>2025年第5号公告修改，法规库显示2025年修订版。
+          <a class="flex overflow-hidden rounded-xl text-[9px] font-medium h-4.5 px-2 select-none" href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/"><span>SSE</span><span>+2</span><span>Neris CSRC</span><span>+2</span></a>
+        </td>
+      </tr>
+      <tr>
+        <td>证监会2023年第64号公告发布。
+          <a class="flex overflow-hidden rounded-xl text-[9px] font-medium h-4.5 px-2 select-none" href="https://www.csrc.gov.cn/csrc/c101954/c7451379/content.shtml"><span>National Cyber Security Review Center</span><span>+1</span></a>
+        </td>
+      </tr>
+    </table>
     <p>Keep this sentence before the file reference.</p>
     <div class="flex items-center rounded-full">
       <svg aria-hidden="true"></svg>
@@ -59,7 +62,7 @@ const sample = `<!doctype html>
     <div aria-label="Response actions" class="flex flex-wrap items-center" role="group" tabindex="-1">
       <button aria-label="Copy response" data-testid="copy-turn-action-button"><span><svg aria-hidden="true"></svg></span></button>
       <button aria-label="Share"><span><svg aria-hidden="true"></svg></span></button>
-      <button class="group/footnote bg-token-bg-primary" aria-label="Sources" style="opacity: 1;">
+      <button class="group/footnote bg-token-bg-primary" aria-label="Sources" style="opacity: 1;" onclick="if (!document.getElementById('source-panel')) { const panel = document.createElement('div'); panel.id = 'source-panel'; panel.innerHTML = document.getElementById('source-panel-template').innerHTML; document.body.appendChild(panel); }">
         <div>
           <img alt="" width="32" height="32" class="icon-sm rounded-full" src="https://www.google.com/s2/favicons?domain=https://developers.openai.com&sz=32">
           <img alt="" width="32" height="32" class="icon-sm rounded-full" src="https://www.google.com/s2/favicons?domain=https://docs.openclaw.ai&sz=32">
@@ -69,6 +72,14 @@ const sample = `<!doctype html>
     </div>
   </div>
 </div>
+<template id="source-panel-template">
+  <a href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/extra-1">SSE 非标准审计意见 第14号</a>
+  <a href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/extra-2">SSE 2025年第5号公告</a>
+  <a href="https://neris.csrc.gov.cn/falvfagui/2025-main.html">Neris CSRC 非标准审计意见 第14号</a>
+  <a href="https://neris.csrc.gov.cn/falvfagui/2025-extra-1.html">Neris CSRC 2025年第5号公告</a>
+  <a href="https://neris.csrc.gov.cn/falvfagui/2025-extra-2.html">Neris CSRC 编报规则第14号</a>
+  <a href="https://www.csrc.gov.cn/csrc/c101877/c1029542/content.shtml">National Cyber Security Review Center 财务报告一般规定附件</a>
+</template>
 <script>
 window.__captured = [];
 window.GM_getValue = (key, fallback) => key === 'notion_token' ? 'token' : key === 'notion_db_id' ? 'dbid' : fallback;
@@ -108,34 +119,52 @@ function plainCode(block) {
   return block?.code?.rich_text?.map(item => item.text.content).join('') || '';
 }
 
+function getBlockRichText(block) {
+  return block.paragraph?.rich_text
+    || block.heading_3?.rich_text
+    || block.bulleted_list_item?.rich_text
+    || block.numbered_list_item?.rich_text
+    || [];
+}
+
+function collectRichText(blocks) {
+  const items = [];
+  for (const block of blocks) {
+    items.push(...getBlockRichText(block));
+    if (block.type === 'table') {
+      for (const row of block.table?.children || []) {
+        for (const cell of row.table_row?.cells || []) items.push(...cell);
+      }
+    }
+  }
+  return items;
+}
+
 (async () => {
   try {
     const btn = await waitFor(() => document.querySelector('#chatgpt-saver-btn'));
     btn.click();
     const payload = await waitFor(() => window.__captured[0]);
     const codeBlocks = payload.children.filter(block => block.type === 'code');
+    const richTextItems = collectRichText(payload.children);
     const linkTexts = [];
     const linkItems = [];
-    for (const block of payload.children) {
-      const richText = block.paragraph?.rich_text || block.heading_3?.rich_text || [];
-      for (const item of richText) {
-        if (item.text?.link) {
-          linkTexts.push(item.text.content);
-          linkItems.push({ content: item.text.content, url: item.text.link.url });
-        }
+    for (const item of richTextItems) {
+      if (item.text?.link) {
+        linkTexts.push(item.text.content);
+        linkItems.push({ content: item.text.content, url: item.text.link.url });
       }
     }
 
     const allTexts = [];
     const imageLikeBlocks = [];
     for (const block of payload.children) {
-      const richText = block.paragraph?.rich_text || block.heading_3?.rich_text || block.bulleted_list_item?.rich_text || block.numbered_list_item?.rich_text || [];
-      const blockText = richText.map(item => item.text?.content || '').join('');
-      if (blockText) allTexts.push(blockText);
-      if (block.type === 'image' || richText.some(item => /图片导出失败|image\.png/.test(item.text?.content || ''))) {
+      if (block.type === 'image' || getBlockRichText(block).some(item => /图片导出失败|image\.png/.test(item.text?.content || ''))) {
         imageLikeBlocks.push(block);
       }
     }
+    const combinedText = richTextItems.map(item => item.text?.content || '').join('');
+    if (combinedText) allTexts.push(combinedText);
 
     const result = {
       codeBlocks: codeBlocks.map(block => ({
@@ -178,11 +207,14 @@ function plainCode(block) {
       if (!linkedUrls.includes(url)) failures.push('collapsed source URL should remain linked: ' + url);
       if (linkedUrls.filter(value => value === url).length !== 1) failures.push('collapsed source URL should be exported once: ' + url);
     }
-    if (!result.allText.includes('SSE / SSE 2 / SSE 3 / Neris CSRC / Neris CSRC 2 / Neris CSRC 3')) {
+    if (!result.allText.includes('SSE / ') || !result.allText.includes('SSE 非标准审计意见 第14号') || !result.allText.includes('SSE 2025年第5号公告') || !result.allText.includes(' / Neris CSRC')) {
       failures.push('grouped source chip should expand collapsed source labels');
     }
-    if (!result.allText.includes('National Cyber Security Review Center / National Cyber Security Review Center 2')) {
+    if (!result.allText.includes('National Cyber Security Review Center / National Cyber Security Review Center 财务报告一般规定附件')) {
       failures.push('single-label source chip should expand collapsed source labels');
+    }
+    if (/\\b(?:SSE|Neris CSRC|National Cyber Security Review Center)\\s*\\+\\d+/.test(result.allText)) {
+      failures.push('expanded source labels should not leave collapsed +N text behind');
     }
     if (result.allText.includes('20260427133441-王翼虹预定的会议-转写智能优化版')) {
       failures.push('file reference chip should stay out of exported text');

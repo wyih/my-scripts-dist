@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.22
+// @version      2.23
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.22] script loaded');
+    console.log('[ChatGPT→Notion v2.23] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -206,6 +206,10 @@
                 onerror: () => reject("PicList 连接失败")
             });
         });
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     async function processAssets(blocks, statusCallback) {
@@ -505,6 +509,17 @@
         };
     }
 
+    function getStoredChatGPTSourceCitationParts(anchor) {
+        const raw = anchor?.getAttribute?.('data-cgpt-source-expanded');
+        if (!raw) return null;
+        try {
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) && parsed.length ? parsed : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
     function splitCodeSafe(code) {
         const chunks = [];
         let remaining = code;
@@ -577,7 +592,7 @@
                 if (['B', 'STRONG'].includes(n.tagName)) ns.bold = true;
                 if (['I', 'EM'].includes(n.tagName)) ns.italic = true;
                 if (n.tagName === 'A' && n.href && n.href.trim() !== '') {
-                    const sourceParts = getChatGPTSourceCitationParts(n, consumedSourceAnchors);
+                    const sourceParts = getStoredChatGPTSourceCitationParts(n) || getChatGPTSourceCitationParts(n, consumedSourceAnchors);
                     if (sourceParts) {
                         sourceParts.forEach((part, index) => {
                             const content = index === 0 ? part.label : ` / ${part.label}`;
@@ -754,6 +769,220 @@
         });
 
         return parts.length ? parts : null;
+    }
+
+    function normalizeSourceUrl(url) {
+        try {
+            const u = new URL(url);
+            ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'].forEach(key => u.searchParams.delete(key));
+            u.hash = '';
+            return u.toString();
+        } catch (e) {
+            return String(url || '');
+        }
+    }
+
+    function getSourceHost(url) {
+        try {
+            return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function labelHostHints(label) {
+        const lower = String(label || '').toLowerCase();
+        if (lower.includes('neris')) return ['neris.csrc.gov.cn'];
+        if (lower.includes('sse')) return ['sse.com.cn', 'static.sse.com.cn'];
+        if (lower.includes('csrc') || lower.includes('national cyber security review center')) return ['csrc.gov.cn'];
+        return [];
+    }
+
+    function getContextTokens(anchor) {
+        const contextEl = anchor.closest('tr, li, p, td, th') || anchor.parentElement;
+        const text = normalizedText(contextEl);
+        const tokens = new Set();
+        const patterns = [
+            /第\s*\d+\s*号/g,
+            /20\d{2}年?/g,
+            /非标准审计意见/g,
+            /财务信息/g,
+            /更正/g,
+            /非经常性损益/g,
+            /净资产收益率/g,
+            /每股收益/g,
+            /财务报告/g,
+            /内部控制/g,
+            /会计类/g,
+            /发行类/g,
+            /上市类/g
+        ];
+        patterns.forEach(pattern => {
+            let match;
+            while ((match = pattern.exec(text))) {
+                const token = match[0].replace(/\s+/g, '');
+                if (token.length >= 2) tokens.add(token);
+            }
+        });
+        const titleMatches = text.match(/《[^》]{4,80}》/g) || [];
+        titleMatches.forEach(title => {
+            title.replace(/[《》]/g, '')
+                .split(/[——、，,（）()：:\s]+/)
+                .filter(part => part.length >= 3 && part.length <= 20)
+                .forEach(part => tokens.add(part));
+        });
+        return Array.from(tokens);
+    }
+
+    function collectChatGPTSourceRegistry() {
+        const seen = new Set();
+        const items = [];
+        Array.from(document.querySelectorAll('a[href^="http://"], a[href^="https://"]')).forEach(anchor => {
+            if (isChatGPTSourceCitationAnchor(anchor)) return;
+            if (anchor.closest('.cgpt-tool-group, [aria-label="Response actions"]')) return;
+
+            const url = anchor.href;
+            const normalizedUrl = normalizeSourceUrl(url);
+            if (!url || seen.has(normalizedUrl)) return;
+
+            const host = getSourceHost(url);
+            if (!host || /(^|\.)chatgpt\.com$|(^|\.)openai\.com$|(^|\.)notion\.so$|google\.com$/.test(host)) return;
+
+            const text = normalizedText(anchor);
+            const label = cleanCitationText(text) || host;
+            const searchText = `${label} ${decodeURIComponent(url)}`.toLowerCase();
+            seen.add(normalizedUrl);
+            items.push({ url, normalizedUrl, host, label, searchText, index: items.length });
+        });
+        return items;
+    }
+
+    function mergeSourceRegistry(target, incoming) {
+        const seen = new Set(target.map(item => item.normalizedUrl));
+        incoming.forEach(item => {
+            if (seen.has(item.normalizedUrl)) return;
+            seen.add(item.normalizedUrl);
+            target.push({ ...item, index: target.length });
+        });
+    }
+
+    function sourceCandidateMatchesGroup(candidate, group, hostHints) {
+        const groupLower = String(group.name || '').toLowerCase();
+        if (groupLower.includes('national cyber security review center') && candidate.host === 'neris.csrc.gov.cn') return false;
+        if (hostHints.some(host => candidate.host === host || candidate.host.endsWith(`.${host}`))) return true;
+        if (groupLower && candidate.searchText.includes(groupLower)) return true;
+        return false;
+    }
+
+    function scoreSourceCandidate(candidate, group, contextTokens, hostHints, preferredIndex) {
+        if (!sourceCandidateMatchesGroup(candidate, group, hostHints)) return -1;
+        let score = 10;
+        if (hostHints.some(host => candidate.host === host || candidate.host.endsWith(`.${host}`))) score += 25;
+        const groupLower = String(group.name || '').toLowerCase();
+        if (groupLower && candidate.searchText.includes(groupLower)) score += 10;
+        contextTokens.forEach(token => {
+            if (candidate.searchText.includes(token.toLowerCase())) score += 8;
+        });
+        if (preferredIndex >= 0) {
+            score -= Math.min(Math.abs(candidate.index - preferredIndex), 80) / 10;
+        }
+        return score;
+    }
+
+    function findBestSourceCandidate(registry, group, usedUrls, contextTokens, preferredIndex, fallbackHostHints = []) {
+        const hostHints = [...new Set([...labelHostHints(group.name), ...fallbackHostHints])];
+        let best = null;
+        let bestScore = -1;
+        registry.forEach(candidate => {
+            if (usedUrls.has(candidate.normalizedUrl)) return;
+            const score = scoreSourceCandidate(candidate, group, contextTokens, hostHints, preferredIndex);
+            if (score > bestScore) {
+                bestScore = score;
+                best = candidate;
+            }
+        });
+        return bestScore >= 0 ? best : null;
+    }
+
+    function buildRegistryBackedSourceParts(anchor, registry) {
+        const groups = parseChatGPTSourceCitationGroups(anchor);
+        if (!groups || !registry.length) return null;
+
+        const contextTokens = getContextTokens(anchor);
+        const usedUrls = new Set();
+        const parts = [];
+        const firstNormalizedUrl = normalizeSourceUrl(anchor.href);
+        const firstRegistryIndex = registry.find(item => item.normalizedUrl === firstNormalizedUrl)?.index ?? -1;
+        const firstHostHint = getSourceHost(anchor.href);
+
+        groups.forEach((group, groupIndex) => {
+            let firstUrl = null;
+            let preferredIndex = firstRegistryIndex;
+            let fallbackHostHints = [];
+
+            if (groupIndex === 0 && anchor.href) {
+                firstUrl = anchor.href;
+                fallbackHostHints = firstHostHint ? [firstHostHint] : [];
+            } else {
+                const candidate = findBestSourceCandidate(registry, group, usedUrls, contextTokens, preferredIndex);
+                if (candidate) {
+                    firstUrl = candidate.url;
+                    preferredIndex = candidate.index;
+                }
+            }
+
+            if (firstUrl) {
+                usedUrls.add(normalizeSourceUrl(firstUrl));
+                parts.push({ label: group.name, url: firstUrl });
+            } else {
+                parts.push({ label: group.name });
+            }
+
+            for (let i = 0; i < group.extraCount; i++) {
+                const candidate = findBestSourceCandidate(registry, group, usedUrls, contextTokens, preferredIndex, fallbackHostHints);
+                if (!candidate) break;
+                usedUrls.add(candidate.normalizedUrl);
+                preferredIndex = candidate.index;
+                parts.push({
+                    label: makeAdditionalSourceLabel(candidate.label, group.name, i + 2),
+                    url: candidate.url
+                });
+            }
+        });
+
+        return parts.length ? parts : null;
+    }
+
+    async function prepareChatGPTSourceExpansions(targetTurns = null) {
+        const turns = targetTurns || getTurnWrappers();
+        const registry = [];
+        mergeSourceRegistry(registry, collectChatGPTSourceRegistry());
+
+        const sourceButtons = new Set();
+        turns.forEach(turn => {
+            Array.from(turn.querySelectorAll('button[aria-label="Sources"]')).forEach(button => sourceButtons.add(button));
+        });
+        if (!sourceButtons.size) {
+            Array.from(document.querySelectorAll('button[aria-label="Sources"]')).forEach(button => sourceButtons.add(button));
+        }
+
+        for (const button of sourceButtons) {
+            try {
+                button.click();
+                await sleep(500);
+                mergeSourceRegistry(registry, collectChatGPTSourceRegistry());
+            } catch (e) {
+                console.warn('[ChatGPT→Notion] source panel expansion failed', e);
+            }
+        }
+
+        turns.forEach(turn => {
+            Array.from(turn.querySelectorAll('a[href]')).forEach(anchor => {
+                if (!isChatGPTSourceCitationAnchor(anchor)) return;
+                const parts = buildRegistryBackedSourceParts(anchor, registry) || getChatGPTSourceCitationParts(anchor);
+                if (parts?.length) anchor.setAttribute('data-cgpt-source-expanded', JSON.stringify(parts));
+            });
+        });
     }
 
     function isCitationMarkerText(text) {
@@ -1172,14 +1401,19 @@
         }
     }
 
-    function handleFullExport() {
+    async function handleFullExport() {
         const btn = document.getElementById('chatgpt-saver-btn');
+        if (btn) {
+            btn.classList.add('loading');
+            btn.textContent = '🔎 Sources...';
+        }
+        await prepareChatGPTSourceExpansions(null);
         const blocks = getChatBlocks(null);
         if (!blocks.length) return alert('空对话');
         executeExport(blocks, getChatTitle(), btn);
     }
 
-    function handleSingleExport(turnWrapper, iconBtn, iconElem) {
+    async function handleSingleExport(turnWrapper, iconBtn, iconElem) {
         const all = getTurnWrappers();
         const idx = all.indexOf(turnWrapper);
         if (idx === -1) return alert('未找到气泡');
@@ -1197,6 +1431,11 @@
                 if (r === 'user') break;
             }
         }
+        if (iconBtn && iconElem) {
+            iconBtn.classList.add('processing');
+            iconElem.textContent = '🔎';
+        }
+        await prepareChatGPTSourceExpansions(targets);
         const blocks = getChatBlocks(targets);
         if (!blocks.length) return alert('空内容');
         const title = getChatTitle(turnWrapper);
