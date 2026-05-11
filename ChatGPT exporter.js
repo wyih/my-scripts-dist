@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.23
+// @version      2.24
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.23] script loaded');
+    console.log('[ChatGPT→Notion v2.24] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -718,10 +718,8 @@
         return links;
     }
 
-    function makeAdditionalSourceLabel(label, sourceName, ordinal) {
-        const cleanLabel = cleanCitationText(label);
-        if (!cleanLabel || cleanLabel === sourceName) return `${sourceName} ${ordinal}`;
-        return cleanLabel;
+    function makeSourceGroupLabel(group, ordinal) {
+        return group.extraCount > 0 ? `${group.name} ${ordinal}` : group.name;
     }
 
     function getChatGPTSourceCitationParts(anchor, consumedSourceAnchors) {
@@ -732,7 +730,6 @@
             return total + group.extraCount + (index === 0 ? 0 : 1);
         }, 0);
         const followingLinks = getFollowingSourceLinks(anchor, consumedSourceAnchors, neededFollowingLinks);
-        const usedUrls = new Set();
         const parts = [];
         let linkIndex = 0;
 
@@ -748,21 +745,21 @@
                 }
             }
 
-            if (firstUrl && !usedUrls.has(firstUrl)) {
-                usedUrls.add(firstUrl);
-                parts.push({ label: group.name, url: firstUrl });
+            if (firstUrl) {
+                parts.push({ label: makeSourceGroupLabel(group, 1), url: firstUrl });
             } else {
-                parts.push({ label: group.name });
+                parts.push({ label: makeSourceGroupLabel(group, 1) });
             }
 
             for (let i = 0; i < group.extraCount; i++) {
                 const extraLink = followingLinks[linkIndex++];
-                if (!extraLink) continue;
+                if (!extraLink) {
+                    if (firstUrl) parts.push({ label: makeSourceGroupLabel(group, i + 2), url: firstUrl });
+                    continue;
+                }
                 consumedSourceAnchors?.add(extraLink.el);
-                if (usedUrls.has(extraLink.url)) continue;
-                usedUrls.add(extraLink.url);
                 parts.push({
-                    label: makeAdditionalSourceLabel(extraLink.label, group.name, i + 2),
+                    label: makeSourceGroupLabel(group, i + 2),
                     url: extraLink.url
                 });
             }
@@ -834,16 +831,16 @@
         return Array.from(tokens);
     }
 
-    function collectChatGPTSourceRegistry() {
-        const seen = new Set();
+    function collectChatGPTSourceRegistry(seenAnchors = new WeakSet()) {
         const items = [];
         Array.from(document.querySelectorAll('a[href^="http://"], a[href^="https://"]')).forEach(anchor => {
+            if (seenAnchors.has(anchor)) return;
             if (isChatGPTSourceCitationAnchor(anchor)) return;
             if (anchor.closest('.cgpt-tool-group, [aria-label="Response actions"]')) return;
 
             const url = anchor.href;
             const normalizedUrl = normalizeSourceUrl(url);
-            if (!url || seen.has(normalizedUrl)) return;
+            if (!url) return;
 
             const host = getSourceHost(url);
             if (!host || /(^|\.)chatgpt\.com$|(^|\.)openai\.com$|(^|\.)notion\.so$|google\.com$/.test(host)) return;
@@ -851,17 +848,14 @@
             const text = normalizedText(anchor);
             const label = cleanCitationText(text) || host;
             const searchText = `${label} ${decodeURIComponent(url)}`.toLowerCase();
-            seen.add(normalizedUrl);
+            seenAnchors.add(anchor);
             items.push({ url, normalizedUrl, host, label, searchText, index: items.length });
         });
         return items;
     }
 
     function mergeSourceRegistry(target, incoming) {
-        const seen = new Set(target.map(item => item.normalizedUrl));
         incoming.forEach(item => {
-            if (seen.has(item.normalizedUrl)) return;
-            seen.add(item.normalizedUrl);
             target.push({ ...item, index: target.length });
         });
     }
@@ -889,12 +883,12 @@
         return score;
     }
 
-    function findBestSourceCandidate(registry, group, usedUrls, contextTokens, preferredIndex, fallbackHostHints = []) {
+    function findBestSourceCandidate(registry, group, usedCandidates, contextTokens, preferredIndex, fallbackHostHints = []) {
         const hostHints = [...new Set([...labelHostHints(group.name), ...fallbackHostHints])];
         let best = null;
         let bestScore = -1;
         registry.forEach(candidate => {
-            if (usedUrls.has(candidate.normalizedUrl)) return;
+            if (usedCandidates.has(candidate.index)) return;
             const score = scoreSourceCandidate(candidate, group, contextTokens, hostHints, preferredIndex);
             if (score > bestScore) {
                 bestScore = score;
@@ -909,7 +903,7 @@
         if (!groups || !registry.length) return null;
 
         const contextTokens = getContextTokens(anchor);
-        const usedUrls = new Set();
+        const usedCandidates = new Set();
         const parts = [];
         const firstNormalizedUrl = normalizeSourceUrl(anchor.href);
         const firstRegistryIndex = registry.find(item => item.normalizedUrl === firstNormalizedUrl)?.index ?? -1;
@@ -923,28 +917,32 @@
             if (groupIndex === 0 && anchor.href) {
                 firstUrl = anchor.href;
                 fallbackHostHints = firstHostHint ? [firstHostHint] : [];
+                if (firstRegistryIndex >= 0) usedCandidates.add(firstRegistryIndex);
             } else {
-                const candidate = findBestSourceCandidate(registry, group, usedUrls, contextTokens, preferredIndex);
+                const candidate = findBestSourceCandidate(registry, group, usedCandidates, contextTokens, preferredIndex);
                 if (candidate) {
                     firstUrl = candidate.url;
                     preferredIndex = candidate.index;
+                    usedCandidates.add(candidate.index);
                 }
             }
 
             if (firstUrl) {
-                usedUrls.add(normalizeSourceUrl(firstUrl));
-                parts.push({ label: group.name, url: firstUrl });
+                parts.push({ label: makeSourceGroupLabel(group, 1), url: firstUrl });
             } else {
-                parts.push({ label: group.name });
+                parts.push({ label: makeSourceGroupLabel(group, 1) });
             }
 
             for (let i = 0; i < group.extraCount; i++) {
-                const candidate = findBestSourceCandidate(registry, group, usedUrls, contextTokens, preferredIndex, fallbackHostHints);
-                if (!candidate) break;
-                usedUrls.add(candidate.normalizedUrl);
+                const candidate = findBestSourceCandidate(registry, group, usedCandidates, contextTokens, preferredIndex, fallbackHostHints);
+                if (!candidate) {
+                    if (firstUrl) parts.push({ label: makeSourceGroupLabel(group, i + 2), url: firstUrl });
+                    continue;
+                }
+                usedCandidates.add(candidate.index);
                 preferredIndex = candidate.index;
                 parts.push({
-                    label: makeAdditionalSourceLabel(candidate.label, group.name, i + 2),
+                    label: makeSourceGroupLabel(group, i + 2),
                     url: candidate.url
                 });
             }
@@ -956,7 +954,8 @@
     async function prepareChatGPTSourceExpansions(targetTurns = null) {
         const turns = targetTurns || getTurnWrappers();
         const registry = [];
-        mergeSourceRegistry(registry, collectChatGPTSourceRegistry());
+        const seenSourceAnchors = new WeakSet();
+        mergeSourceRegistry(registry, collectChatGPTSourceRegistry(seenSourceAnchors));
 
         const sourceButtons = new Set();
         turns.forEach(turn => {
@@ -970,7 +969,7 @@
             try {
                 button.click();
                 await sleep(500);
-                mergeSourceRegistry(registry, collectChatGPTSourceRegistry());
+                mergeSourceRegistry(registry, collectChatGPTSourceRegistry(seenSourceAnchors));
             } catch (e) {
                 console.warn('[ChatGPT→Notion] source panel expansion failed', e);
             }

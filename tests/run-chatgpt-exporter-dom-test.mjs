@@ -73,8 +73,8 @@ const sample = `<!doctype html>
   </div>
 </div>
 <template id="source-panel-template">
-  <a href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/extra-1">SSE 非标准审计意见 第14号</a>
-  <a href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/extra-2">SSE 2025年第5号公告</a>
+  <a href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/">SSE 非标准审计意见 第14号</a>
+  <a href="https://www.sse.com.cn/lawandrules/regulations/csrcannoun/">SSE 2025年第5号公告</a>
   <a href="https://neris.csrc.gov.cn/falvfagui/2025-main.html">Neris CSRC 非标准审计意见 第14号</a>
   <a href="https://neris.csrc.gov.cn/falvfagui/2025-extra-1.html">Neris CSRC 2025年第5号公告</a>
   <a href="https://neris.csrc.gov.cn/falvfagui/2025-extra-2.html">Neris CSRC 编报规则第14号</a>
@@ -193,24 +193,43 @@ function collectRichText(blocks) {
     if (!result.linkTexts.includes('IDEAS/RePEc')) failures.push('clean source label should remain linked');
     if (result.allText.includes('IDEAS/RePEc+5')) failures.push('regular citation marker should stay out of link text');
     const linkedUrls = result.linkItems.map(item => item.url);
-    const expectedSourceUrls = [
-      'https://www.sse.com.cn/lawandrules/regulations/csrcannoun/',
-      'https://www.sse.com.cn/lawandrules/regulations/csrcannoun/extra-1',
-      'https://www.sse.com.cn/lawandrules/regulations/csrcannoun/extra-2',
+    const expectedSourceLabels = [
+      'SSE 1',
+      ' / SSE 2',
+      ' / SSE 3',
+      ' / Neris CSRC 1',
+      ' / Neris CSRC 2',
+      ' / Neris CSRC 3',
+      'National Cyber Security Review Center 1',
+      ' / National Cyber Security Review Center 2'
+    ];
+    for (const content of expectedSourceLabels) {
+      if (!result.linkItems.some(item => item.content === content)) {
+        failures.push('collapsed source label should remain linked: ' + content);
+      }
+    }
+    if (linkedUrls.filter(value => value === 'https://www.sse.com.cn/lawandrules/regulations/csrcannoun/').length !== 3) {
+      failures.push('duplicate source URLs should keep one entry per collapsed source');
+    }
+    for (const url of [
       'https://neris.csrc.gov.cn/falvfagui/2025-main.html',
       'https://neris.csrc.gov.cn/falvfagui/2025-extra-1.html',
       'https://neris.csrc.gov.cn/falvfagui/2025-extra-2.html',
       'https://www.csrc.gov.cn/csrc/c101954/c7451379/content.shtml',
       'https://www.csrc.gov.cn/csrc/c101877/c1029542/content.shtml'
-    ];
-    for (const url of expectedSourceUrls) {
+    ]) {
       if (!linkedUrls.includes(url)) failures.push('collapsed source URL should remain linked: ' + url);
-      if (linkedUrls.filter(value => value === url).length !== 1) failures.push('collapsed source URL should be exported once: ' + url);
     }
-    if (!result.allText.includes('SSE / ') || !result.allText.includes('SSE 非标准审计意见 第14号') || !result.allText.includes('SSE 2025年第5号公告') || !result.allText.includes(' / Neris CSRC')) {
+    if (!result.linkItems.some(item => item.content === 'National Cyber Security Review Center 1' && item.url === 'https://www.csrc.gov.cn/csrc/c101954/c7451379/content.shtml')) {
+      failures.push('primary +1 source should use numbered label 1 with the chip URL');
+    }
+    if (!result.linkItems.some(item => item.content === ' / National Cyber Security Review Center 2' && item.url === 'https://www.csrc.gov.cn/csrc/c101877/c1029542/content.shtml')) {
+      failures.push('extra +1 source should use numbered label 2 with the additional URL');
+    }
+    if (!result.allText.includes('SSE 1 / SSE 2 / SSE 3 / Neris CSRC 1 / Neris CSRC 2 / Neris CSRC 3')) {
       failures.push('grouped source chip should expand collapsed source labels');
     }
-    if (!result.allText.includes('National Cyber Security Review Center / National Cyber Security Review Center 财务报告一般规定附件')) {
+    if (!result.allText.includes('National Cyber Security Review Center 1 / National Cyber Security Review Center 2')) {
       failures.push('single-label source chip should expand collapsed source labels');
     }
     if (/\\b(?:SSE|Neris CSRC|National Cyber Security Review Center)\\s*\\+\\d+/.test(result.allText)) {
