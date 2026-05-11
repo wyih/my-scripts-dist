@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.21
+// @version      2.22
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -21,7 +21,7 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.21] script loaded');
+    console.log('[ChatGPT→Notion v2.22] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -495,6 +495,16 @@
         return stripLeadingLanguageLabel(text, language);
     }
 
+    function makeTextRichText(content, state = {}, link = null) {
+        const text = { content };
+        if (link) text.link = link;
+        return {
+            type: "text",
+            text,
+            annotations: { bold: !!state.bold, italic: !!state.italic, code: !!state.code, color: "default" }
+        };
+    }
+
     function splitCodeSafe(code) {
         const chunks = [];
         let remaining = code;
@@ -514,10 +524,12 @@
     // 1. 解析行内节点 (Text & Inline Equation)
     function parseInlineNodes(nodes) {
         const rt = [];
+        const consumedSourceAnchors = new WeakSet();
         function tr(n, s = {}) {
             // [公式修复] 兼容新旧版 ChatGPT 结构
             let latex = null;
             if (n.nodeType === 1) {
+                if (consumedSourceAnchors.has(n)) return;
                 if (isIgnorableChatGPTFileReference(n)) return;
 
                 // 1. 优先尝试：标准属性
@@ -557,8 +569,7 @@
 
                 for (let i = 0; i < fullText.length; i += MAX_TEXT_LENGTH) {
                     rt.push({
-                        type: "text", text: { content: fullText.slice(i, i + MAX_TEXT_LENGTH), link: s.link },
-                        annotations: { bold: !!s.bold, italic: !!s.italic, code: !!s.code, color: "default" }
+                        ...makeTextRichText(fullText.slice(i, i + MAX_TEXT_LENGTH), s, s.link)
                     });
                 }
             } else if (n.nodeType === 1) {
@@ -566,14 +577,20 @@
                 if (['B', 'STRONG'].includes(n.tagName)) ns.bold = true;
                 if (['I', 'EM'].includes(n.tagName)) ns.italic = true;
                 if (n.tagName === 'A' && n.href && n.href.trim() !== '') {
+                    const sourceParts = getChatGPTSourceCitationParts(n, consumedSourceAnchors);
+                    if (sourceParts) {
+                        sourceParts.forEach((part, index) => {
+                            const content = index === 0 ? part.label : ` / ${part.label}`;
+                            const link = part.url ? { url: part.url } : null;
+                            rt.push(makeTextRichText(content, ns, link));
+                        });
+                        return;
+                    }
+
                     const label = getAnchorDisplayText(n);
                     if (!label) return;
                     for (let i = 0; i < label.length; i += MAX_TEXT_LENGTH) {
-                        rt.push({
-                            type: "text",
-                            text: { content: label.slice(i, i + MAX_TEXT_LENGTH), link: { url: n.href } },
-                            annotations: { bold: !!ns.bold, italic: !!ns.italic, code: !!ns.code, color: "default" }
-                        });
+                        rt.push(makeTextRichText(label.slice(i, i + MAX_TEXT_LENGTH), ns, { url: n.href }));
                     }
                     return;
                 }
@@ -592,6 +609,151 @@
             .replace(/\s+/g, ' ')
             .replace(/\s*(?:[+＋]\s*\d+|\[\d+\])\s*$/g, '')
             .trim();
+    }
+
+    function isChatGPTSourceCitationAnchor(anchor) {
+        if (!anchor || anchor.nodeType !== 1 || anchor.tagName !== 'A') return false;
+        const className = String(anchor.className || '');
+        return /\+\d+/.test(anchor.textContent || '') &&
+            className.includes('select-none') &&
+            className.includes('rounded-xl') &&
+            className.includes('text-[9px]');
+    }
+
+    function parseChatGPTSourceCitationGroups(anchor) {
+        if (!isChatGPTSourceCitationAnchor(anchor)) return null;
+        const rawText = String(anchor.textContent || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!rawText) return null;
+
+        const groups = [];
+        const seen = new Set();
+        const re = /([^+＋]+?)\s*[+＋]\s*(\d+)(?=[^+＋]*[+＋]\s*\d+|$)/g;
+        let match;
+        while ((match = re.exec(rawText))) {
+            const name = match[1].trim();
+            const extraCount = Number.parseInt(match[2], 10);
+            if (!name) continue;
+            const key = `${name}\u0000${extraCount}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            groups.push({ name, extraCount: Number.isFinite(extraCount) ? extraCount : 0 });
+        }
+
+        if (groups.length) return groups;
+        const fallback = rawText.replace(/\s*(\+\d+)/g, ' $1').trim();
+        return fallback ? [{ name: fallback, extraCount: 0 }] : null;
+    }
+
+    function getSourceCitationContainer(anchor) {
+        return anchor.closest('td, th, li, p') || anchor.parentElement;
+    }
+
+    function nextNodeAfterSubtree(node, root) {
+        let current = node;
+        while (current && current !== root) {
+            if (current.nextSibling) return current.nextSibling;
+            current = current.parentNode;
+        }
+        return null;
+    }
+
+    function nextNodeInRoot(node, root) {
+        if (node.firstChild) return node.firstChild;
+        return nextNodeAfterSubtree(node, root);
+    }
+
+    function hasMeaningfulTextBetween(startNode, endNode, root) {
+        let node = nextNodeAfterSubtree(startNode, root);
+        while (node && node !== endNode && !endNode.contains(node)) {
+            if (node.nodeType === 3 && !/^[\s/|,，、;；]*$/.test(node.textContent || '')) return true;
+            node = nextNodeInRoot(node, root);
+        }
+        return false;
+    }
+
+    function getFollowingSourceLinks(anchor, consumedSourceAnchors, neededCount) {
+        const container = getSourceCitationContainer(anchor);
+        if (!container || neededCount <= 0) return [];
+
+        const anchors = Array.from(container.querySelectorAll('a[href]'));
+        const start = anchors.indexOf(anchor);
+        if (start < 0) return [];
+
+        const seenUrls = new Set([anchor.href]);
+        const links = [];
+        let previousAnchor = anchor;
+        for (const candidate of anchors.slice(start + 1)) {
+            if (consumedSourceAnchors?.has(candidate)) continue;
+            if (hasMeaningfulTextBetween(previousAnchor, candidate, container)) break;
+
+            const url = candidate.href;
+            if (!url || seenUrls.has(url)) continue;
+
+            const label = getAnchorDisplayText(candidate);
+            if (!label) continue;
+
+            seenUrls.add(url);
+            links.push({ el: candidate, url, label });
+            previousAnchor = candidate;
+            if (links.length >= neededCount) break;
+        }
+        return links;
+    }
+
+    function makeAdditionalSourceLabel(label, sourceName, ordinal) {
+        const cleanLabel = cleanCitationText(label);
+        if (!cleanLabel || cleanLabel === sourceName) return `${sourceName} ${ordinal}`;
+        return cleanLabel;
+    }
+
+    function getChatGPTSourceCitationParts(anchor, consumedSourceAnchors) {
+        const groups = parseChatGPTSourceCitationGroups(anchor);
+        if (!groups) return null;
+
+        const neededFollowingLinks = groups.reduce((total, group, index) => {
+            return total + group.extraCount + (index === 0 ? 0 : 1);
+        }, 0);
+        const followingLinks = getFollowingSourceLinks(anchor, consumedSourceAnchors, neededFollowingLinks);
+        const usedUrls = new Set();
+        const parts = [];
+        let linkIndex = 0;
+
+        groups.forEach((group, groupIndex) => {
+            let firstUrl = null;
+            if (groupIndex === 0 && anchor.href) {
+                firstUrl = anchor.href;
+            } else {
+                const linkedSource = followingLinks[linkIndex++];
+                if (linkedSource) {
+                    firstUrl = linkedSource.url;
+                    consumedSourceAnchors?.add(linkedSource.el);
+                }
+            }
+
+            if (firstUrl && !usedUrls.has(firstUrl)) {
+                usedUrls.add(firstUrl);
+                parts.push({ label: group.name, url: firstUrl });
+            } else {
+                parts.push({ label: group.name });
+            }
+
+            for (let i = 0; i < group.extraCount; i++) {
+                const extraLink = followingLinks[linkIndex++];
+                if (!extraLink) continue;
+                consumedSourceAnchors?.add(extraLink.el);
+                if (usedUrls.has(extraLink.url)) continue;
+                usedUrls.add(extraLink.url);
+                parts.push({
+                    label: makeAdditionalSourceLabel(extraLink.label, group.name, i + 2),
+                    url: extraLink.url
+                });
+            }
+        });
+
+        return parts.length ? parts : null;
     }
 
     function isCitationMarkerText(text) {
