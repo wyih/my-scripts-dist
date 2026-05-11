@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.24
+// @version      2.25
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -15,13 +15,14 @@
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
+// @grant        unsafeWindow
 // @run-at       document-end
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.24] script loaded');
+    console.log('[ChatGPT→Notion v2.25] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -626,10 +627,17 @@
             .trim();
     }
 
+    function getVisibleText(el) {
+        return String(el?.innerText || el?.textContent || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
     function isChatGPTSourceCitationAnchor(anchor) {
         if (!anchor || anchor.nodeType !== 1 || anchor.tagName !== 'A') return false;
         const className = String(anchor.className || '');
-        return /\+\d+/.test(anchor.textContent || '') &&
+        return /\+\d+/.test(getVisibleText(anchor)) &&
             className.includes('select-none') &&
             className.includes('rounded-xl') &&
             className.includes('text-[9px]');
@@ -637,29 +645,249 @@
 
     function parseChatGPTSourceCitationGroups(anchor) {
         if (!isChatGPTSourceCitationAnchor(anchor)) return null;
-        const rawText = String(anchor.textContent || '')
-            .replace(/[\u200B-\u200D\uFEFF]/g, '')
-            .replace(/\s+/g, ' ')
-            .trim();
+        const rawText = getVisibleText(anchor);
         if (!rawText) return null;
 
-        const groups = [];
-        const seen = new Set();
-        const re = /([^+＋]+?)\s*[+＋]\s*(\d+)(?=[^+＋]*[+＋]\s*\d+|$)/g;
-        let match;
-        while ((match = re.exec(rawText))) {
-            const name = match[1].trim();
+        const match = rawText.match(/([^+＋]+?)\s*[+＋]\s*(\d+)/);
+        if (match) {
+            const name = cleanSourceDisplayLabel(match[1], anchor.href);
             const extraCount = Number.parseInt(match[2], 10);
-            if (!name) continue;
-            const key = `${name}\u0000${extraCount}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            groups.push({ name, extraCount: Number.isFinite(extraCount) ? extraCount : 0 });
+            if (name) return [{ name, extraCount: Number.isFinite(extraCount) ? extraCount : 0 }];
         }
 
-        if (groups.length) return groups;
-        const fallback = rawText.replace(/\s*(\+\d+)/g, ' $1').trim();
+        const fallback = cleanSourceDisplayLabel(rawText.replace(/\s*(\+\d+)/g, ' $1'), anchor.href);
         return fallback ? [{ name: fallback, extraCount: 0 }] : null;
+    }
+
+    function getSourceCitationExpectedCount(anchor) {
+        const groups = parseChatGPTSourceCitationGroups(anchor);
+        if (!groups) return 0;
+        return groups.reduce((total, group) => total + 1 + group.extraCount, 0);
+    }
+
+    function getConversationIdFromLocation() {
+        if (window.__cgptTestConversationId) return window.__cgptTestConversationId;
+        const match = location.pathname.match(/\/c\/([^/?#]+)/);
+        return match ? decodeURIComponent(match[1]) : '';
+    }
+
+    async function fetchChatGPTConversationJson() {
+        const conversationId = getConversationIdFromLocation();
+        if (!conversationId) return null;
+        try {
+            const response = await fetch(`/backend-api/conversation/${conversationId}`, { credentials: 'include' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return await response.json();
+        } catch (e) {
+            console.warn('[ChatGPT→Notion] conversation metadata fetch failed', e);
+            return null;
+        }
+    }
+
+    function getCitationObjectUrl(value) {
+        const keys = [
+            'url',
+            'href',
+            'link',
+            'source_url',
+            'sourceUrl',
+            'safe_url',
+            'safeUrl',
+            'ref_url',
+            'refUrl',
+            'web_url',
+            'webUrl',
+            'canonical_url',
+            'canonicalUrl',
+            'uri'
+        ];
+        for (const key of keys) {
+            const maybeUrl = value?.[key];
+            if (typeof maybeUrl === 'string' && /^https?:\/\//.test(maybeUrl)) return maybeUrl;
+        }
+        return '';
+    }
+
+    function getCitationObjectLabel(value, url) {
+        const keys = [
+            'title',
+            'name',
+            'label',
+            'site_name',
+            'siteName',
+            'domain',
+            'source',
+            'publisher',
+            'attribution'
+        ];
+        for (const key of keys) {
+            const maybeLabel = value?.[key];
+            if (typeof maybeLabel !== 'string') continue;
+            const label = cleanCitationText(maybeLabel);
+            if (label && !/^https?:\/\//.test(label)) return label;
+        }
+        return getSourceHost(url);
+    }
+
+    function collectCitationObjects(value, out = []) {
+        if (!value) return out;
+        if (Array.isArray(value)) {
+            value.forEach(item => collectCitationObjects(item, out));
+            return out;
+        }
+        if (typeof value !== 'object') return out;
+
+        const maybeUrl = getCitationObjectUrl(value);
+        if (maybeUrl) {
+            out.push({
+                label: getCitationObjectLabel(value, maybeUrl),
+                url: maybeUrl
+            });
+        }
+
+        Object.keys(value).forEach(key => {
+            if (/^(url|href|link|source_?url|safe_?url|ref_?url|web_?url|canonical_?url|uri|title|name|label|domain|site_?name|source|publisher|attribution)$/i.test(key)) return;
+            collectCitationObjects(value[key], out);
+        });
+        return out;
+    }
+
+    function getTurnMessageId(turn) {
+        return turn?.getAttribute?.('data-message-id')
+            || turn?.querySelector?.('[data-message-id]')?.getAttribute('data-message-id')
+            || '';
+    }
+
+    function collectStringLeaves(value, out = []) {
+        if (!value) return out;
+        if (typeof value === 'string') {
+            out.push(value);
+            return out;
+        }
+        if (Array.isArray(value)) {
+            value.forEach(item => collectStringLeaves(item, out));
+            return out;
+        }
+        if (typeof value !== 'object') return out;
+        Object.keys(value).forEach(key => {
+            if (/^(metadata|citations?|sources?|url|href|link|source_?url|safe_?url|ref_?url|web_?url|canonical_?url)$/i.test(key)) return;
+            collectStringLeaves(value[key], out);
+        });
+        return out;
+    }
+
+    function getConversationMessageText(message) {
+        return collectStringLeaves(message?.content, []).join(' ');
+    }
+
+    function compactMessageMatchText(text) {
+        return String(text || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/[+＋]\s*\d+/g, '')
+            .replace(/[\s"'`.,;:!?()[\]{}<>，。；：！？（）【】《》、/\\|=_-]+/g, '')
+            .toLowerCase();
+    }
+
+    function getSubstringMatchScore(needleText, haystackText) {
+        if (!needleText || !haystackText) return 0;
+        const maxLen = Math.min(96, needleText.length);
+        for (let len = maxLen; len >= 16; len -= 8) {
+            for (let i = 0; i <= needleText.length - len; i += 12) {
+                if (haystackText.includes(needleText.slice(i, i + len))) return len;
+            }
+        }
+        return 0;
+    }
+
+    function getConversationAssistantMessages(conversationJson) {
+        const messages = Object.values(conversationJson?.mapping || {})
+            .map(node => node?.message)
+            .filter(message => message?.author?.role === 'assistant');
+        return messages.sort((a, b) => (a.create_time || 0) - (b.create_time || 0));
+    }
+
+    function findConversationMessageByTurnText(turn, assistantMessages) {
+        const turnText = compactMessageMatchText(normalizedText(turn));
+        if (!turnText) return null;
+        let best = null;
+        let bestScore = 0;
+        for (const message of assistantMessages || []) {
+            const messageText = compactMessageMatchText(getConversationMessageText(message));
+            const score = getSubstringMatchScore(messageText, turnText);
+            if (score > bestScore) {
+                best = message;
+                bestScore = score;
+            }
+        }
+        return bestScore >= 16 ? best : null;
+    }
+
+    function getConversationMessageForTurn(conversationJson, turn, assistantMessages = []) {
+        const messageId = getTurnMessageId(turn);
+        if (!conversationJson?.mapping) return null;
+        const exactMessage = messageId ? conversationJson.mapping[messageId]?.message : null;
+        return exactMessage || findConversationMessageByTurnText(turn, assistantMessages);
+    }
+
+    function collectMessageCitationSources(message) {
+        if (!message) return [];
+        const candidates = [];
+        collectCitationObjects(message.metadata, candidates);
+        collectCitationObjects(message.content, candidates);
+
+        const seen = new Set();
+        return candidates.filter(source => {
+            const normalizedUrl = normalizeSourceUrl(source.url);
+            if (!normalizedUrl || seen.has(normalizedUrl)) return false;
+            const host = getSourceHost(source.url);
+            if (!host || /(^|\.)chatgpt\.com$|(^|\.)openai\.com$|google\.com$/.test(host)) return false;
+            seen.add(normalizedUrl);
+            return true;
+        });
+    }
+
+    function shouldNumberDuplicateLabels(sources) {
+        const counts = new Map();
+        sources.forEach(source => {
+            const label = cleanSourceDisplayLabel(source.label, source.url) || getSourceHost(source.url);
+            counts.set(label, (counts.get(label) || 0) + 1);
+        });
+        return counts;
+    }
+
+    function dedupeSourcesByUrl(sources) {
+        const seen = new Set();
+        return (sources || []).filter(source => {
+            const key = normalizeSourceUrl(source?.url);
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    }
+
+    function makeSourcePartsFromSources(sources, startIndex, count) {
+        const selected = dedupeSourcesByUrl(sources).slice(startIndex, startIndex + count);
+        const labelCounts = shouldNumberDuplicateLabels(selected);
+        const seenLabels = new Map();
+        return selected.map(source => {
+            const baseLabel = cleanSourceDisplayLabel(source.label, source.url) || getSourceHost(source.url);
+            const nextOrdinal = (seenLabels.get(baseLabel) || 0) + 1;
+            seenLabels.set(baseLabel, nextOrdinal);
+            const label = labelCounts.get(baseLabel) > 1 ? `${baseLabel} ${nextOrdinal}` : baseLabel;
+            return { label, url: source.url };
+        });
+    }
+
+    function findSourceIndexByUrl(sources, url, minIndex = 0) {
+        const normalizedUrl = normalizeSourceUrl(url);
+        if (!normalizedUrl) return -1;
+        for (let i = Math.max(0, minIndex); i < sources.length; i++) {
+            if (normalizeSourceUrl(sources[i]?.url) === normalizedUrl) return i;
+        }
+        for (let i = 0; i < Math.max(0, minIndex); i++) {
+            if (normalizeSourceUrl(sources[i]?.url) === normalizedUrl) return i;
+        }
+        return -1;
     }
 
     function getSourceCitationContainer(anchor) {
@@ -722,6 +950,40 @@
         return group.extraCount > 0 ? `${group.name} ${ordinal}` : group.name;
     }
 
+    function makeSourcePartsFromGroups(anchor, groups, urlsByGroup = [], options = {}) {
+        const includeMissing = !!options.includeMissing;
+        const parts = [];
+        const visibleUrl = anchor?.href || '';
+        groups.forEach((group, groupIndex) => {
+            const count = 1 + group.extraCount;
+            const urls = urlsByGroup[groupIndex] || [];
+            const sourceUrls = [];
+            for (let i = 0; i < count; i++) {
+                sourceUrls.push(i === 0 && groupIndex === 0 && visibleUrl ? visibleUrl : urls[i]);
+            }
+            const seenUrls = new Set();
+            const knownCount = sourceUrls
+                .map(url => normalizeSourceUrl(url))
+                .filter(Boolean)
+                .filter((url, index, urls) => urls.indexOf(url) === index)
+                .length;
+            for (let i = 0; i < count; i++) {
+                const url = sourceUrls[i];
+                if (!url && !includeMissing) continue;
+                const key = normalizeSourceUrl(url);
+                if (key) {
+                    if (seenUrls.has(key)) continue;
+                    seenUrls.add(key);
+                }
+                const shouldNumber = group.extraCount > 0 && (knownCount > 1 || includeMissing);
+                const label = shouldNumber ? makeSourceGroupLabel(group, i + 1) : group.name;
+                if (url) parts.push({ label, url });
+                else parts.push({ label });
+            }
+        });
+        return parts;
+    }
+
     function getChatGPTSourceCitationParts(anchor, consumedSourceAnchors) {
         const groups = parseChatGPTSourceCitationGroups(anchor);
         if (!groups) return null;
@@ -730,41 +992,29 @@
             return total + group.extraCount + (index === 0 ? 0 : 1);
         }, 0);
         const followingLinks = getFollowingSourceLinks(anchor, consumedSourceAnchors, neededFollowingLinks);
-        const parts = [];
+        const urlsByGroup = groups.map(() => []);
         let linkIndex = 0;
 
         groups.forEach((group, groupIndex) => {
-            let firstUrl = null;
             if (groupIndex === 0 && anchor.href) {
-                firstUrl = anchor.href;
+                urlsByGroup[groupIndex].push(anchor.href);
             } else {
                 const linkedSource = followingLinks[linkIndex++];
                 if (linkedSource) {
-                    firstUrl = linkedSource.url;
+                    urlsByGroup[groupIndex].push(linkedSource.url);
                     consumedSourceAnchors?.add(linkedSource.el);
                 }
             }
 
-            if (firstUrl) {
-                parts.push({ label: makeSourceGroupLabel(group, 1), url: firstUrl });
-            } else {
-                parts.push({ label: makeSourceGroupLabel(group, 1) });
-            }
-
             for (let i = 0; i < group.extraCount; i++) {
                 const extraLink = followingLinks[linkIndex++];
-                if (!extraLink) {
-                    if (firstUrl) parts.push({ label: makeSourceGroupLabel(group, i + 2), url: firstUrl });
-                    continue;
-                }
+                if (!extraLink) continue;
                 consumedSourceAnchors?.add(extraLink.el);
-                parts.push({
-                    label: makeSourceGroupLabel(group, i + 2),
-                    url: extraLink.url
-                });
+                urlsByGroup[groupIndex].push(extraLink.url);
             }
         });
 
+        const parts = makeSourcePartsFromGroups(anchor, groups, urlsByGroup);
         return parts.length ? parts : null;
     }
 
@@ -787,201 +1037,833 @@
         }
     }
 
-    function labelHostHints(label) {
-        const lower = String(label || '').toLowerCase();
-        if (lower.includes('neris')) return ['neris.csrc.gov.cn'];
-        if (lower.includes('sse')) return ['sse.com.cn', 'static.sse.com.cn'];
-        if (lower.includes('csrc') || lower.includes('national cyber security review center')) return ['csrc.gov.cn'];
-        return [];
+    function isVisibleElement(el) {
+        if (!el || el.nodeType !== 1) return false;
+        const rect = el.getBoundingClientRect?.();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
     }
 
-    function getContextTokens(anchor) {
-        const contextEl = anchor.closest('tr, li, p, td, th') || anchor.parentElement;
-        const text = normalizedText(contextEl);
-        const tokens = new Set();
-        const patterns = [
-            /第\s*\d+\s*号/g,
-            /20\d{2}年?/g,
-            /非标准审计意见/g,
-            /财务信息/g,
-            /更正/g,
-            /非经常性损益/g,
-            /净资产收益率/g,
-            /每股收益/g,
-            /财务报告/g,
-            /内部控制/g,
-            /会计类/g,
-            /发行类/g,
-            /上市类/g
-        ];
-        patterns.forEach(pattern => {
-            let match;
-            while ((match = pattern.exec(text))) {
-                const token = match[0].replace(/\s+/g, '');
-                if (token.length >= 2) tokens.add(token);
-            }
-        });
-        const titleMatches = text.match(/《[^》]{4,80}》/g) || [];
-        titleMatches.forEach(title => {
-            title.replace(/[《》]/g, '')
-                .split(/[——、，,（）()：:\s]+/)
-                .filter(part => part.length >= 3 && part.length <= 20)
-                .forEach(part => tokens.add(part));
-        });
-        return Array.from(tokens);
+    function extractFirstHttpUrl(text) {
+        const match = String(text || '').match(/https?:\/\/[^\s"'<>）)]+/);
+        return match ? match[0].replace(/[.,;，。；]+$/, '') : '';
     }
 
-    function collectChatGPTSourceRegistry(seenAnchors = new WeakSet()) {
-        const items = [];
-        Array.from(document.querySelectorAll('a[href^="http://"], a[href^="https://"]')).forEach(anchor => {
-            if (seenAnchors.has(anchor)) return;
-            if (isChatGPTSourceCitationAnchor(anchor)) return;
-            if (anchor.closest('.cgpt-tool-group, [aria-label="Response actions"]')) return;
-
-            const url = anchor.href;
-            const normalizedUrl = normalizeSourceUrl(url);
-            if (!url) return;
-
-            const host = getSourceHost(url);
-            if (!host || /(^|\.)chatgpt\.com$|(^|\.)openai\.com$|(^|\.)notion\.so$|google\.com$/.test(host)) return;
-
-            const text = normalizedText(anchor);
-            const label = cleanCitationText(text) || host;
-            const searchText = `${label} ${decodeURIComponent(url)}`.toLowerCase();
-            seenAnchors.add(anchor);
-            items.push({ url, normalizedUrl, host, label, searchText, index: items.length });
-        });
-        return items;
+    function stripUrlsFromText(text) {
+        return String(text || '')
+            .replace(/https?:\/\/[^\s"'<>）)]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
-    function mergeSourceRegistry(target, incoming) {
-        incoming.forEach(item => {
-            target.push({ ...item, index: target.length });
-        });
+    function getFriendlySourceLabelFromUrl(url) {
+        const host = getSourceHost(url);
+        if (host === 'neris.csrc.gov.cn') return 'Neris CSRC';
+        if (host === 'sse.com.cn' || host === 'static.sse.com.cn') return 'SSE';
+        if (host.endsWith('csrc.gov.cn')) return 'National Cyber Security Review Center';
+        return host;
     }
 
-    function sourceCandidateMatchesGroup(candidate, group, hostHints) {
-        const groupLower = String(group.name || '').toLowerCase();
-        if (groupLower.includes('national cyber security review center') && candidate.host === 'neris.csrc.gov.cn') return false;
-        if (hostHints.some(host => candidate.host === host || candidate.host.endsWith(`.${host}`))) return true;
-        if (groupLower && candidate.searchText.includes(groupLower)) return true;
-        return false;
+    function getKnownSourceLabelFromText(text) {
+        const lower = String(text || '').toLowerCase();
+        return [
+            'National Cyber Security Review Center',
+            'Neris CSRC',
+            'IDEAS/RePEc',
+            'Archive Source',
+            'SSE'
+        ].find(label => lower.includes(label.toLowerCase())) || '';
     }
 
-    function scoreSourceCandidate(candidate, group, contextTokens, hostHints, preferredIndex) {
-        if (!sourceCandidateMatchesGroup(candidate, group, hostHints)) return -1;
-        let score = 10;
-        if (hostHints.some(host => candidate.host === host || candidate.host.endsWith(`.${host}`))) score += 25;
-        const groupLower = String(group.name || '').toLowerCase();
-        if (groupLower && candidate.searchText.includes(groupLower)) score += 10;
-        contextTokens.forEach(token => {
-            if (candidate.searchText.includes(token.toLowerCase())) score += 8;
-        });
-        if (preferredIndex >= 0) {
-            score -= Math.min(Math.abs(candidate.index - preferredIndex), 80) / 10;
+    function cleanSourceDisplayLabel(text, url = '') {
+        const raw = String(text || '');
+        let label = cleanCitationText(stripUrlsFromText(text))
+            .replace(/\bRead more\b.*$/i, '')
+            .replace(/\b\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}\b.*$/, '')
+            .replace(/\s+\d+\s*$/g, '')
+            .replace(/[—–-]\s*$/, '')
+            .trim();
+        const knownLabel = getKnownSourceLabelFromText(label) || getKnownSourceLabelFromText(raw);
+        if (knownLabel && (label.length > knownLabel.length + 20 || /\bRead more\b/i.test(raw) || /[\u4e00-\u9fff]/.test(label))) {
+            return knownLabel;
         }
-        return score;
+        if (!label || label.length > 80 || /[\u4e00-\u9fff].*\bRead more\b/i.test(raw)) {
+            label = getFriendlySourceLabelFromUrl(url);
+        }
+        return label || getFriendlySourceLabelFromUrl(url);
     }
 
-    function findBestSourceCandidate(registry, group, usedCandidates, contextTokens, preferredIndex, fallbackHostHints = []) {
-        const hostHints = [...new Set([...labelHostHints(group.name), ...fallbackHostHints])];
-        let best = null;
-        let bestScore = -1;
-        registry.forEach(candidate => {
-            if (usedCandidates.has(candidate.index)) return;
-            const score = scoreSourceCandidate(candidate, group, contextTokens, hostHints, preferredIndex);
-            if (score > bestScore) {
-                bestScore = score;
-                best = candidate;
-            }
+    function cleanPopoverSourceLabel(text, url) {
+        return cleanSourceDisplayLabel(text, url);
+    }
+
+    function getVisibleCitationPopover(groupNames) {
+        const candidates = Array.from(document.querySelectorAll([
+            '[data-radix-popper-content-wrapper]',
+            '[role="tooltip"]',
+            '[role="dialog"]',
+            '[data-side]',
+            '[data-align]'
+        ].join(','))).filter(isVisibleElement);
+
+        const matching = candidates.filter(el => {
+            const text = normalizedText(el);
+            if (!extractFirstHttpUrl(text) && !el.querySelector('a[href^="http://"], a[href^="https://"]')) return false;
+            if (!groupNames?.length) return true;
+            return groupNames.some(name => text.toLowerCase().includes(String(name || '').toLowerCase()));
         });
-        return bestScore >= 0 ? best : null;
+
+        return matching.sort((a, b) => {
+            const aControls = a.querySelectorAll?.('button').length ? 1 : 0;
+            const bControls = b.querySelectorAll?.('button').length ? 1 : 0;
+            if (aControls !== bControls) return bControls - aControls;
+            const aLinks = a.querySelectorAll?.('a[href^="http://"], a[href^="https://"]').length ? 1 : 0;
+            const bLinks = b.querySelectorAll?.('a[href^="http://"], a[href^="https://"]').length ? 1 : 0;
+            if (aLinks !== bLinks) return bLinks - aLinks;
+            const aTooltip = a.matches?.('[role="tooltip"]') ? 1 : 0;
+            const bTooltip = b.matches?.('[role="tooltip"]') ? 1 : 0;
+            if (aTooltip !== bTooltip) return aTooltip - bTooltip;
+            const az = Number.parseInt(window.getComputedStyle(a).zIndex, 10) || 0;
+            const bz = Number.parseInt(window.getComputedStyle(b).zIndex, 10) || 0;
+            return bz - az;
+        })[0] || null;
     }
 
-    function buildRegistryBackedSourceParts(anchor, registry) {
-        const groups = parseChatGPTSourceCitationGroups(anchor);
-        if (!groups || !registry.length) return null;
+    async function waitForCitationPopover(groupNames = null, timeoutMs = 180, previousText = '') {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            const popover = getVisibleCitationPopover(groupNames) || getVisibleCitationPopover(null);
+            if (popover) {
+                const text = normalizedText(popover);
+                if (!previousText || text !== previousText) return popover;
+            }
+            await sleep(40);
+        }
+        return getVisibleCitationPopover(groupNames) || getVisibleCitationPopover(null);
+    }
 
-        const contextTokens = getContextTokens(anchor);
-        const usedCandidates = new Set();
-        const parts = [];
-        const firstNormalizedUrl = normalizeSourceUrl(anchor.href);
-        const firstRegistryIndex = registry.find(item => item.normalizedUrl === firstNormalizedUrl)?.index ?? -1;
-        const firstHostHint = getSourceHost(anchor.href);
+    function extractCitationPopoverSources(popover) {
+        if (!popover) return [];
+        const links = Array.from(popover.querySelectorAll('a[href^="http://"], a[href^="https://"]'))
+            .filter(a => {
+                const host = getSourceHost(a.href);
+                return host && !/(^|\.)chatgpt\.com$|(^|\.)openai\.com$|google\.com$/.test(host);
+            });
 
-        groups.forEach((group, groupIndex) => {
-            let firstUrl = null;
-            let preferredIndex = firstRegistryIndex;
-            let fallbackHostHints = [];
+        if (links.length) {
+            return links.map(link => ({
+                label: cleanPopoverSourceLabel(normalizedText(link), link.href),
+                url: link.href
+            }));
+        }
 
-            if (groupIndex === 0 && anchor.href) {
-                firstUrl = anchor.href;
-                fallbackHostHints = firstHostHint ? [firstHostHint] : [];
-                if (firstRegistryIndex >= 0) usedCandidates.add(firstRegistryIndex);
-            } else {
-                const candidate = findBestSourceCandidate(registry, group, usedCandidates, contextTokens, preferredIndex);
-                if (candidate) {
-                    firstUrl = candidate.url;
-                    preferredIndex = candidate.index;
-                    usedCandidates.add(candidate.index);
+        const text = normalizedText(popover);
+        const url = extractFirstHttpUrl(text);
+        if (!url) return [];
+        return [{ label: cleanPopoverSourceLabel(text, url), url }];
+    }
+
+    function getCitationPopoverControlRoot(popover) {
+        if (!popover) return null;
+        for (let node = popover; node && node !== document.body; node = node.parentElement) {
+            if (node.querySelectorAll?.('button').length) return node;
+            if (node.matches?.('[data-radix-popper-content-wrapper]')) return node;
+        }
+        return popover;
+    }
+
+    function findCitationPopoverNextButton(popover) {
+        if (!popover) return null;
+        const root = getCitationPopoverControlRoot(popover);
+        const allButtons = Array.from(root.querySelectorAll('button')).filter(isVisibleElement);
+        const buttons = allButtons.filter(button => {
+            if (!isVisibleElement(button)) return false;
+            if (button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+            return true;
+        });
+        const labeled = buttons.find(button => /next|forward|right|下|后|后一|右|→|›|»/i.test(button.getAttribute('aria-label') || button.title || normalizedText(button)));
+        if (labeled) return labeled;
+        if (buttons.length === 1 && allButtons.length >= 2) return buttons[0];
+        const rightmost = buttons
+            .map(button => ({ button, rect: button.getBoundingClientRect?.() }))
+            .filter(item => item.rect && item.rect.width > 0 && item.rect.height > 0)
+            .sort((a, b) => b.rect.left - a.rect.left)[0]?.button;
+        if (rightmost) return rightmost;
+        return buttons.length >= 2 ? buttons[1] : null;
+    }
+
+    function closeCitationPopover() {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        document.body?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    }
+
+    function getKeyboardEventInit(key) {
+        const code = key;
+        const keyCodeMap = { Escape: 27, ArrowRight: 39, ArrowLeft: 37 };
+        return {
+            bubbles: true,
+            cancelable: true,
+            key,
+            code,
+            keyCode: keyCodeMap[key] || 0,
+            which: keyCodeMap[key] || 0
+        };
+    }
+
+    function dispatchKeyboardEventPair(target, key) {
+        if (!target) return;
+        const init = getKeyboardEventInit(key);
+        target.dispatchEvent(new KeyboardEvent('keydown', init));
+        target.dispatchEvent(new KeyboardEvent('keyup', init));
+    }
+
+    async function dispatchChatGPTKeyUntilChanged(key, popover, previousText) {
+        const targets = [document.activeElement, popover, document.body, document, window].filter(Boolean);
+        const dispatched = new Set();
+        for (const el of targets) {
+            if (dispatched.has(el)) continue;
+            dispatched.add(el);
+            dispatchKeyboardEventPair(el, key);
+            await sleep(50);
+            const nextPopover = getVisibleCitationPopover(null);
+            if (nextPopover && normalizedText(nextPopover) !== previousText) return nextPopover;
+        }
+        return null;
+    }
+
+    async function clickCitationPopoverNextUntilChanged(popover, previousText) {
+        const nextButton = findCitationPopoverNextButton(popover);
+        if (!nextButton) return null;
+        const previousLocation = location.href;
+        dispatchChatGPTClick(nextButton);
+        let nextPopover = await waitForCitationPopover(null, 180, previousText);
+        if (nextPopover && normalizedText(nextPopover) !== previousText) return nextPopover;
+        await invokeReactHandlersAsync(nextButton, [
+            'onPointerDown',
+            'onPointerDownCapture'
+        ], 'pointerdown');
+        nextPopover = await waitForCitationPopover(null, 180, previousText);
+        if (nextPopover && normalizedText(nextPopover) !== previousText) return nextPopover;
+        await invokeReactHandlersAsync(nextButton, [
+            'onMouseDown',
+            'onMouseDownCapture'
+        ], 'mousedown');
+        nextPopover = await waitForCitationPopover(null, 180, previousText);
+        if (nextPopover && normalizedText(nextPopover) !== previousText) return nextPopover;
+        await invokeReactHandlersAsync(nextButton, [
+            'onPointerUp',
+            'onPointerUpCapture'
+        ], 'pointerup');
+        nextPopover = await waitForCitationPopover(null, 180, previousText);
+        if (nextPopover && normalizedText(nextPopover) !== previousText) return nextPopover;
+        await invokeReactHandlersAsync(nextButton, [
+            'onMouseUp',
+            'onMouseUpCapture'
+        ], 'mouseup');
+        nextPopover = await waitForCitationPopover(null, 180, previousText);
+        if (nextPopover && normalizedText(nextPopover) !== previousText) return nextPopover;
+        await invokeReactHandlersAsync(nextButton, [
+            'onClick',
+            'onClickCapture'
+        ], 'click');
+        nextPopover = await waitForCitationPopover(null, 500, previousText);
+        if (location.href !== previousLocation) {
+            console.warn('[ChatGPT→Notion] source popover attempted navigation; keeping current page');
+            return null;
+        }
+        if (nextPopover && normalizedText(nextPopover) !== previousText) return nextPopover;
+        return null;
+    }
+
+    function createMouseLikeEvent(type, init, preferPointer = false) {
+        const PointerCtor = window.PointerEvent || MouseEvent;
+        const Ctor = preferPointer ? PointerCtor : MouseEvent;
+        try {
+            return new Ctor(type, init);
+        } catch (e) {
+            return new MouseEvent(type, init);
+        }
+    }
+
+    function makeReactLikeEvent(el, type) {
+        return {
+            type,
+            target: el,
+            currentTarget: el,
+            nativeEvent: { isTrusted: true },
+            bubbles: true,
+            cancelable: true,
+            defaultPrevented: false,
+            isTrusted: true,
+            preventDefault() { this.defaultPrevented = true; },
+            stopPropagation() { this.cancelBubble = true; },
+            stopImmediatePropagation() { this.cancelBubble = true; },
+            isDefaultPrevented() { return !!this.defaultPrevented; },
+            isPropagationStopped() { return !!this.cancelBubble; },
+            persist() {}
+        };
+    }
+
+    function getReactInternalProps(node) {
+        if (!node || node.nodeType !== 1) return [];
+        const props = [];
+        Object.keys(node).forEach(key => {
+            if (/^__reactProps\$|^__reactEventHandlers\$/.test(key) && node[key]) props.push(node[key]);
+            if (/^__reactFiber\$/.test(key) && node[key]?.memoizedProps) props.push(node[key].memoizedProps);
+        });
+        return props;
+    }
+
+    function invokeReactHandlersInCurrentWorld(el, handlerNames, eventType) {
+        let count = 0;
+        const path = [];
+        for (let node = el; node && node.nodeType === 1 && path.length < 8; node = node.parentElement) path.push(node);
+        for (const node of path) {
+            for (const props of getReactInternalProps(node)) {
+                for (const name of handlerNames) {
+                    const handler = props?.[name];
+                    if (typeof handler !== 'function') continue;
+                    try {
+                        const event = makeReactLikeEvent(el, eventType);
+                        event.currentTarget = node;
+                        handler.call(node, event);
+                        count++;
+                    } catch (e) {
+                        // DOM dispatch remains the fallback path.
+                    }
                 }
             }
+        }
+        return count;
+    }
 
-            if (firstUrl) {
-                parts.push({ label: makeSourceGroupLabel(group, 1), url: firstUrl });
-            } else {
-                parts.push({ label: makeSourceGroupLabel(group, 1) });
-            }
-
-            for (let i = 0; i < group.extraCount; i++) {
-                const candidate = findBestSourceCandidate(registry, group, usedCandidates, contextTokens, preferredIndex, fallbackHostHints);
-                if (!candidate) {
-                    if (firstUrl) parts.push({ label: makeSourceGroupLabel(group, i + 2), url: firstUrl });
-                    continue;
-                }
-                usedCandidates.add(candidate.index);
-                preferredIndex = candidate.index;
-                parts.push({
-                    label: makeSourceGroupLabel(group, i + 2),
-                    url: candidate.url
+    function invokeReactHandlersInPageWorld(el, handlerNames, eventType) {
+        try {
+            const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : null;
+            if (!pageWindow?.Function) return 0;
+            const runner = pageWindow.Function('el', 'handlerNames', 'eventType', `
+                const path = [];
+                for (let node = el; node && node.nodeType === 1 && path.length < 8; node = node.parentElement) path.push(node);
+                const getProps = node => {
+                    const out = [];
+                    Object.keys(node).forEach(key => {
+                        if ((/^__reactProps\\$|^__reactEventHandlers\\$/).test(key) && node[key]) out.push(node[key]);
+                        if ((/^__reactFiber\\$/).test(key) && node[key] && node[key].memoizedProps) out.push(node[key].memoizedProps);
+                    });
+                    return out;
+                };
+                const makeEvent = currentTarget => ({
+                    type: eventType,
+                    target: el,
+                    currentTarget,
+                    nativeEvent: { isTrusted: true },
+                    bubbles: true,
+                    cancelable: true,
+                    defaultPrevented: false,
+                    isTrusted: true,
+                    preventDefault() { this.defaultPrevented = true; },
+                    stopPropagation() { this.cancelBubble = true; },
+                    stopImmediatePropagation() { this.cancelBubble = true; },
+                    isDefaultPrevented() { return !!this.defaultPrevented; },
+                    isPropagationStopped() { return !!this.cancelBubble; },
+                    persist() {}
                 });
+                let count = 0;
+                for (const node of path) {
+                    for (const props of getProps(node)) {
+                        for (const name of handlerNames) {
+                            const handler = props && props[name];
+                            if (typeof handler !== 'function') continue;
+                            try {
+                                handler.call(node, makeEvent(node));
+                                count++;
+                            } catch (e) {}
+                        }
+                    }
+                }
+                return count;
+            `);
+            return Number(runner(el, handlerNames, eventType)) || 0;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    function invokeReactHandlers(el, handlerNames, eventType) {
+        const currentCount = invokeReactHandlersInCurrentWorld(el, handlerNames, eventType);
+        return currentCount || invokeReactHandlersInPageWorld(el, handlerNames, eventType);
+    }
+
+    let injectedReactHandlerSupport = null;
+
+    function invokeReactHandlersByInjectedScript(el, handlerNames, eventType) {
+        return new Promise(resolve => {
+            if (!el || !document.documentElement) return resolve(0);
+            if (injectedReactHandlerSupport === false) return resolve(0);
+            const marker = `cgpt-react-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            const eventName = `${marker}-done`;
+            const oldMarker = el.getAttribute('data-cgpt-react-target');
+            let script = null;
+            el.setAttribute('data-cgpt-react-target', marker);
+
+            const cleanup = () => {
+                if (oldMarker == null) el.removeAttribute('data-cgpt-react-target');
+                else el.setAttribute('data-cgpt-react-target', oldMarker);
+                script?.remove?.();
+                window.removeEventListener(eventName, onDone);
+            };
+            const timer = window.setTimeout(() => {
+                injectedReactHandlerSupport = false;
+                cleanup();
+                resolve(0);
+            }, 250);
+            const onDone = event => {
+                injectedReactHandlerSupport = true;
+                window.clearTimeout(timer);
+                cleanup();
+                resolve(Number(event.detail?.count) || 0);
+            };
+            window.addEventListener(eventName, onDone, { once: true });
+
+            script = document.createElement('script');
+            script.textContent = `(() => {
+                const el = document.querySelector('[data-cgpt-react-target="${marker}"]');
+                const handlerNames = ${JSON.stringify(handlerNames)};
+                const eventType = ${JSON.stringify(eventType)};
+                const eventName = ${JSON.stringify(eventName)};
+                let count = 0;
+                const path = [];
+                for (let node = el; node && node.nodeType === 1 && path.length < 12; node = node.parentElement) path.push(node);
+                const getProps = node => {
+                    const out = [];
+                    Object.keys(node || {}).forEach(key => {
+                        if ((/^__reactProps\\$|^__reactEventHandlers\\$/).test(key) && node[key]) out.push(node[key]);
+                        if ((/^__reactFiber\\$/).test(key) && node[key] && node[key].memoizedProps) out.push(node[key].memoizedProps);
+                    });
+                    return out;
+                };
+                const rect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+                const clientX = rect.left + rect.width / 2;
+                const clientY = rect.top + rect.height / 2;
+                const makeEvent = currentTarget => ({
+                    type: eventType,
+                    target: el,
+                    currentTarget,
+                    nativeEvent: { isTrusted: true, type: eventType, target: el, clientX, clientY, pointerType: 'mouse' },
+                    bubbles: true,
+                    cancelable: true,
+                    defaultPrevented: false,
+                    isTrusted: true,
+                    clientX,
+                    clientY,
+                    screenX: clientX,
+                    screenY: clientY,
+                    button: 0,
+                    buttons: eventType.includes('down') ? 1 : 0,
+                    pointerType: 'mouse',
+                    pointerId: 1,
+                    isPrimary: true,
+                    preventDefault() { this.defaultPrevented = true; },
+                    stopPropagation() { this.cancelBubble = true; },
+                    stopImmediatePropagation() { this.cancelBubble = true; },
+                    isDefaultPrevented() { return !!this.defaultPrevented; },
+                    isPropagationStopped() { return !!this.cancelBubble; },
+                    persist() {}
+                });
+                for (const node of path) {
+                    for (const props of getProps(node)) {
+                        for (const name of handlerNames) {
+                            const handler = props && props[name];
+                            if (typeof handler !== 'function') continue;
+                            try {
+                                handler.call(node, makeEvent(node));
+                                count++;
+                            } catch (e) {}
+                        }
+                    }
+                }
+                window.dispatchEvent(new CustomEvent(eventName, { detail: { count } }));
+            })();`;
+            try {
+                (document.head || document.documentElement).appendChild(script);
+            } catch (e) {
+                window.clearTimeout(timer);
+                cleanup();
+                resolve(0);
             }
         });
+    }
 
+    async function invokeReactHandlersAsync(el, handlerNames, eventType) {
+        const injectedCount = await invokeReactHandlersByInjectedScript(el, handlerNames, eventType);
+        if (injectedCount) return injectedCount;
+        const pageWorldCount = invokeReactHandlersInPageWorld(el, handlerNames, eventType);
+        if (pageWorldCount) return pageWorldCount;
+        return invokeReactHandlersInCurrentWorld(el, handlerNames, eventType);
+    }
+
+    function getSourceScrollSnapshot() {
+        return {
+            x: window.scrollX,
+            y: window.scrollY,
+            active: document.activeElement
+        };
+    }
+
+    function restoreSourceScroll(snapshot) {
+        if (!snapshot) return;
+        window.scrollTo(snapshot.x, snapshot.y);
+        if (snapshot.active?.focus) {
+            try { snapshot.active.focus({ preventScroll: true }); } catch (e) {}
+        }
+    }
+
+    async function bringCitationTargetIntoView(el) {
+        if (!el?.scrollIntoView) return;
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        await sleep(120);
+    }
+
+    function getMouseEventInit(el, pressed = false) {
+        const rect = el?.getBoundingClientRect?.();
+        const clientX = rect ? rect.left + rect.width / 2 : 0;
+        const clientY = rect ? rect.top + rect.height / 2 : 0;
+        return {
+            bubbles: true,
+            cancelable: true,
+            clientX,
+            clientY,
+            screenX: clientX,
+            screenY: clientY,
+            button: 0,
+            buttons: pressed ? 1 : 0
+        };
+    }
+
+    function dispatchChatGPTHover(el) {
+        if (!el) return;
+        const init = getMouseEventInit(el);
+        el.dispatchEvent(createMouseLikeEvent('pointerover', { ...init, pointerType: 'mouse', pointerId: 1, isPrimary: true }, true));
+        invokeReactHandlers(el, ['onPointerOver', 'onPointerEnter'], 'pointerover');
+        el.dispatchEvent(createMouseLikeEvent('mouseover', init));
+        el.dispatchEvent(createMouseLikeEvent('mouseenter', { ...init, bubbles: false }));
+        invokeReactHandlers(el, ['onMouseOver', 'onMouseEnter'], 'mouseover');
+        el.dispatchEvent(createMouseLikeEvent('pointermove', { ...init, pointerType: 'mouse', pointerId: 1, isPrimary: true }, true));
+        el.dispatchEvent(createMouseLikeEvent('mousemove', init));
+        invokeReactHandlers(el, ['onPointerMove', 'onMouseMove', 'onFocus'], 'mousemove');
+    }
+
+    function dispatchChatGPTClick(el) {
+        if (!el) return;
+        dispatchChatGPTHover(el);
+        const downInit = getMouseEventInit(el, true);
+        const upInit = getMouseEventInit(el, false);
+        el.dispatchEvent(createMouseLikeEvent('pointerdown', { ...downInit, pointerType: 'mouse', pointerId: 1, isPrimary: true }, true));
+        invokeReactHandlers(el, ['onPointerDown'], 'pointerdown');
+        el.dispatchEvent(createMouseLikeEvent('mousedown', downInit));
+        invokeReactHandlers(el, ['onMouseDown'], 'mousedown');
+        el.dispatchEvent(createMouseLikeEvent('pointerup', { ...upInit, pointerType: 'mouse', pointerId: 1, isPrimary: true }, true));
+        invokeReactHandlers(el, ['onPointerUp'], 'pointerup');
+        el.dispatchEvent(createMouseLikeEvent('mouseup', upInit));
+        invokeReactHandlers(el, ['onMouseUp'], 'mouseup');
+        el.dispatchEvent(createMouseLikeEvent('click', upInit));
+        invokeReactHandlers(el, ['onClick'], 'click');
+    }
+
+    async function invokeChatGPTHoverHandlers(el) {
+        return await invokeReactHandlersAsync(el, [
+            'onPointerOver',
+            'onPointerOverCapture',
+            'onPointerEnter',
+            'onPointerEnterCapture',
+            'onPointerMove',
+            'onPointerMoveCapture',
+            'onMouseOver',
+            'onMouseOverCapture',
+            'onMouseEnter',
+            'onMouseEnterCapture',
+            'onMouseMove',
+            'onMouseMoveCapture',
+            'onFocus',
+            'onFocusCapture'
+        ], 'pointerover');
+    }
+
+    async function invokeChatGPTClickHandlers(el) {
+        return await invokeReactHandlersAsync(el, [
+            'onPointerDown',
+            'onPointerDownCapture',
+            'onMouseDown',
+            'onMouseDownCapture',
+            'onPointerUp',
+            'onPointerUpCapture',
+            'onMouseUp',
+            'onMouseUpCapture',
+            'onClick',
+            'onClickCapture'
+        ], 'click');
+    }
+
+    async function advanceCitationPopover(popover, previousText) {
+        let nextPopover = await dispatchChatGPTKeyUntilChanged('ArrowRight', popover, previousText);
+        if (nextPopover) return nextPopover;
+        nextPopover = await clickCitationPopoverNextUntilChanged(popover, previousText);
+        if (nextPopover) return nextPopover;
+        return null;
+    }
+
+    async function suppressCitationPopoverNavigation(task) {
+        const originalOpen = window.open;
+        const preventPopoverAnchorClick = event => {
+            const anchor = event.target?.closest?.('a[href]');
+            if (isChatGPTSourceCitationAnchor(anchor)) {
+                event.preventDefault();
+                return;
+            }
+            const popover = getVisibleCitationPopover(null);
+            if (!anchor || !popover?.contains(anchor)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+        };
+        window.open = function () {
+            console.warn('[ChatGPT→Notion] blocked source popover window.open during export');
+            return null;
+        };
+        document.addEventListener('click', preventPopoverAnchorClick, true);
+        try {
+            return await task();
+        } finally {
+            window.open = originalOpen;
+            document.removeEventListener('click', preventPopoverAnchorClick, true);
+        }
+    }
+
+    async function collectCitationPopoverSources(target, neededCount, groupNames) {
+        const sources = [];
+        if (!target || neededCount <= 0) return sources;
+
+        const scrollSnapshot = getSourceScrollSnapshot();
+        const seenSourceUrls = new Set();
+        let popover = null;
+        try {
+            const clickable = target.closest?.('a[href]') || target;
+            await bringCitationTargetIntoView(clickable);
+            closeCitationPopover();
+            await sleep(20);
+
+            dispatchChatGPTHover(target);
+            popover = await waitForCitationPopover(groupNames, 500);
+            if (!popover) {
+                await invokeChatGPTHoverHandlers(target);
+                popover = await waitForCitationPopover(groupNames, 500);
+            }
+            if (!popover && clickable !== target) {
+                dispatchChatGPTHover(clickable);
+                popover = await waitForCitationPopover(groupNames, 500);
+            }
+            if (!popover && clickable !== target) {
+                await invokeChatGPTHoverHandlers(clickable);
+                popover = await waitForCitationPopover(groupNames, 500);
+            }
+            if (!popover) {
+                dispatchChatGPTClick(target);
+                popover = await waitForCitationPopover(groupNames, 500);
+            }
+            if (!popover) {
+                await invokeChatGPTClickHandlers(target);
+                popover = await waitForCitationPopover(groupNames, 500);
+            }
+            if (!popover && clickable !== target) {
+                dispatchChatGPTClick(clickable);
+                popover = await waitForCitationPopover(groupNames, 500);
+            }
+            if (!popover && clickable !== target) {
+                await invokeChatGPTClickHandlers(clickable);
+                popover = await waitForCitationPopover(groupNames, 500);
+            }
+
+            const seenPages = new Set();
+            for (let i = 0; i < neededCount + 3 && sources.length < neededCount; i++) {
+                popover = popover || getVisibleCitationPopover(i === 0 ? groupNames : null) || getVisibleCitationPopover(null);
+                if (!popover) break;
+
+                const pageKey = normalizedText(popover);
+                if (seenPages.has(pageKey)) break;
+                seenPages.add(pageKey);
+
+                const pageSources = extractCitationPopoverSources(popover);
+                for (const source of pageSources) {
+                    if (!source?.url) continue;
+                    const sourceKey = normalizeSourceUrl(source.url);
+                    if (!sourceKey || seenSourceUrls.has(sourceKey)) continue;
+                    seenSourceUrls.add(sourceKey);
+                    sources.push(source);
+                    if (sources.length >= neededCount) break;
+                }
+
+                if (sources.length >= neededCount) break;
+                popover = await advanceCitationPopover(popover, pageKey);
+                if (!popover) break;
+            }
+        } finally {
+            closeCitationPopover();
+            await sleep(20);
+            restoreSourceScroll(scrollSnapshot);
+        }
+
+        return sources;
+    }
+
+    function getChatGPTSourceGroupHoverTargets(anchor, groups) {
+        const elements = Array.from(anchor.querySelectorAll('*')).filter(isVisibleElement);
+        let searchStart = 0;
+        return groups.map(group => {
+            const groupName = String(group.name || '').toLowerCase();
+            let found = null;
+            for (let i = searchStart; i < elements.length; i++) {
+                const text = normalizedText(elements[i]).toLowerCase();
+                if (groupName && text.includes(groupName)) {
+                    found = elements[i];
+                    searchStart = i + 1;
+                    break;
+                }
+            }
+            return found || anchor;
+        });
+    }
+
+    async function getChatGPTSourceCitationPartsFromPopover(anchor) {
+        const groups = parseChatGPTSourceCitationGroups(anchor);
+        if (!groups) return null;
+        const neededCount = groups.reduce((total, group) => total + 1 + group.extraCount, 0);
+        if (neededCount <= 1) return null;
+
+        const sources = [];
+        const targets = getChatGPTSourceGroupHoverTargets(anchor, groups);
+        for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+            const group = groups[groupIndex];
+            const count = 1 + group.extraCount;
+            sources.push(...await collectCitationPopoverSources(targets[groupIndex], count, [group.name]));
+        }
+        const parts = makeSourcePartsFromSources(sources, 0, neededCount);
         return parts.length ? parts : null;
     }
 
-    async function prepareChatGPTSourceExpansions(targetTurns = null) {
+    function sourcePartsHaveCompleteUrls(parts, groups) {
+        if (!parts?.length || !groups?.length) return false;
+        const neededCount = groups.reduce((total, group) => total + 1 + group.extraCount, 0);
+        if (parts.length < neededCount) return false;
+        const urls = parts.slice(0, neededCount).map(part => part?.url).filter(Boolean);
+        if (urls.length < neededCount) return false;
+        return new Set(urls).size >= neededCount;
+    }
+
+    function buildConversationBackedSourceParts(anchor, messageSources, consumedCountRef) {
+        const count = getSourceCitationExpectedCount(anchor);
+        if (!count || !messageSources?.length) return null;
+        const consumedCount = consumedCountRef?.count || 0;
+        const matchedIndex = findSourceIndexByUrl(messageSources, anchor.href, consumedCount);
+        const startIndex = matchedIndex >= 0 ? matchedIndex : consumedCount;
+        const parts = makeSourcePartsFromSources(messageSources, startIndex, count);
+        if (consumedCountRef) consumedCountRef.count = Math.max(consumedCount, startIndex + parts.length);
+        return parts.length ? parts : null;
+    }
+
+    function getSourceExpansionWeight(anchor) {
+        return Math.max(0, getSourceCitationExpectedCount(anchor) - 1);
+    }
+
+    function getTotalSourceExpansionWeight(turns) {
+        return turns.reduce((total, turn) => {
+            return total + Array.from(turn.querySelectorAll('a[href]'))
+                .filter(isChatGPTSourceCitationAnchor)
+                .reduce((sum, anchor) => sum + getSourceExpansionWeight(anchor), 0);
+        }, 0);
+    }
+
+    function getSourcePrepMaxMs(turns, options = {}) {
+        const baseMs = options.maxMs ?? 3500;
+        const maxMsCap = options.maxMsCap ?? 12000;
+        const totalWeight = getTotalSourceExpansionWeight(turns);
+        const dynamicMs = 2000 + totalWeight * 700;
+        return Math.min(maxMsCap, Math.max(baseMs, dynamicMs));
+    }
+
+    async function prepareChatGPTSourceExpansions(targetTurns = null, options = {}) {
         const turns = targetTurns || getTurnWrappers();
-        const registry = [];
-        const seenSourceAnchors = new WeakSet();
-        mergeSourceRegistry(registry, collectChatGPTSourceRegistry(seenSourceAnchors));
+        const conversationJson = await fetchChatGPTConversationJson();
+        const assistantMessages = getConversationAssistantMessages(conversationJson);
+        const expansionCache = new Map();
+        const sourcePrepDeadline = Date.now() + getSourcePrepMaxMs(turns, options);
 
-        const sourceButtons = new Set();
-        turns.forEach(turn => {
-            Array.from(turn.querySelectorAll('button[aria-label="Sources"]')).forEach(button => sourceButtons.add(button));
-        });
-        if (!sourceButtons.size) {
-            Array.from(document.querySelectorAll('button[aria-label="Sources"]')).forEach(button => sourceButtons.add(button));
-        }
-
-        for (const button of sourceButtons) {
-            try {
-                button.click();
-                await sleep(500);
-                mergeSourceRegistry(registry, collectChatGPTSourceRegistry(seenSourceAnchors));
-            } catch (e) {
-                console.warn('[ChatGPT→Notion] source panel expansion failed', e);
+        for (const turn of turns) {
+            if (Date.now() > sourcePrepDeadline) {
+                console.warn('[ChatGPT→Notion] source prep timed out; exporting with available links');
+                return;
+            }
+            const message = getConversationMessageForTurn(conversationJson, turn, assistantMessages);
+            const messageSources = collectMessageCitationSources(message);
+            const anchors = Array.from(turn.querySelectorAll('a[href]'));
+            const sourceAnchors = anchors.filter(isChatGPTSourceCitationAnchor);
+            const orderedSourceAnchors = sourceAnchors
+                .map((anchor, index) => ({ anchor, index, weight: getSourceExpansionWeight(anchor) }))
+                .filter(item => item.weight > 0)
+                .sort((a, b) => b.weight - a.weight || a.index - b.index);
+            for (const item of orderedSourceAnchors) {
+                if (Date.now() > sourcePrepDeadline) {
+                    console.warn('[ChatGPT→Notion] source prep timed out; exporting with available links');
+                    return;
+                }
+                const anchor = item.anchor;
+                const cacheKey = `${normalizeSourceUrl(anchor.href)}\u0000${normalizedText(anchor)}`;
+                let parts = expansionCache.get(cacheKey);
+                if (!parts) {
+                    const groups = parseChatGPTSourceCitationGroups(anchor);
+                    const conversationParts = buildConversationBackedSourceParts(anchor, messageSources, null);
+                    let fastParts = conversationParts || getChatGPTSourceCitationParts(anchor);
+                    if (sourcePartsHaveCompleteUrls(fastParts, groups)) {
+                        parts = fastParts;
+                    } else if (Date.now() < sourcePrepDeadline) {
+                        const popoverParts = await suppressCitationPopoverNavigation(
+                            () => getChatGPTSourceCitationPartsFromPopover(anchor)
+                        );
+                        if (sourcePartsHaveCompleteUrls(popoverParts, groups)) {
+                            parts = popoverParts;
+                        } else {
+                            const candidates = [fastParts, popoverParts].filter(Boolean);
+                            parts = candidates.sort((a, b) => {
+                                const au = a.filter(part => part?.url).length;
+                                const bu = b.filter(part => part?.url).length;
+                                return bu - au;
+                            })[0];
+                        }
+                    } else {
+                        parts = fastParts;
+                    }
+                    if (parts?.length) expansionCache.set(cacheKey, parts);
+                    if (!sourcePartsHaveCompleteUrls(parts, groups)) {
+                        const expected = groups.reduce((total, group) => total + 1 + group.extraCount, 0);
+                        const got = parts?.filter(part => part?.url).length || 0;
+                        console.warn('[ChatGPT→Notion] source expansion incomplete ' + JSON.stringify({
+                            label: normalizedText(anchor),
+                            expected,
+                            got
+                        }));
+                    }
+                }
+                if (parts?.length) anchor.setAttribute('data-cgpt-source-expanded', JSON.stringify(parts));
             }
         }
+    }
 
-        turns.forEach(turn => {
-            Array.from(turn.querySelectorAll('a[href]')).forEach(anchor => {
-                if (!isChatGPTSourceCitationAnchor(anchor)) return;
-                const parts = buildRegistryBackedSourceParts(anchor, registry) || getChatGPTSourceCitationParts(anchor);
-                if (parts?.length) anchor.setAttribute('data-cgpt-source-expanded', JSON.stringify(parts));
-            });
-        });
+    async function prepareChatGPTSourceExpansionsSafely(targetTurns = null, options = {}) {
+        try {
+            await prepareChatGPTSourceExpansions(targetTurns, options);
+        } catch (e) {
+            console.warn('[ChatGPT→Notion] source prep failed; exporting with available links', e);
+        }
     }
 
     function isCitationMarkerText(text) {
@@ -1035,6 +1917,14 @@
 
     function removeChatGPTExportChrome(root) {
         root.querySelectorAll('.cgpt-tool-group, [aria-label="Response actions"], button[aria-label="Sources"]').forEach(el => el.remove());
+        root.querySelectorAll('[aria-label="Reasoning details"], [role="region"]').forEach(el => {
+            const label = String(el.getAttribute('aria-label') || '');
+            const text = normalizedText(el).slice(0, 300);
+            if (/Reasoning details/i.test(label) || /^(Pro thinking|Reasoning|Activity)\b/i.test(text)) el.remove();
+        });
+        root.querySelectorAll('button').forEach(button => {
+            if (/^Thought for\s+\d+\s*(?:m|min|s|sec|h|hr)/i.test(normalizedText(button))) button.remove();
+        });
     }
 
     // 2. 递归处理块级节点 (Block Equation & Structure)
@@ -1406,7 +2296,7 @@
             btn.classList.add('loading');
             btn.textContent = '🔎 Sources...';
         }
-        await prepareChatGPTSourceExpansions(null);
+        await prepareChatGPTSourceExpansionsSafely(null, { maxMs: 5500, maxMsCap: 12000 });
         const blocks = getChatBlocks(null);
         if (!blocks.length) return alert('空对话');
         executeExport(blocks, getChatTitle(), btn);
@@ -1434,7 +2324,7 @@
             iconBtn.classList.add('processing');
             iconElem.textContent = '🔎';
         }
-        await prepareChatGPTSourceExpansions(targets);
+        await prepareChatGPTSourceExpansionsSafely(targets, { maxMs: 4500, maxMsCap: 10000 });
         const blocks = getChatBlocks(targets);
         if (!blocks.length) return alert('空内容');
         const title = getChatTitle(turnWrapper);
