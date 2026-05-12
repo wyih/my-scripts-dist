@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.25
+// @version      2.26
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -22,7 +22,7 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.25] script loaded');
+    console.log('[ChatGPT→Notion v2.26] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -544,6 +544,7 @@
         function tr(n, s = {}) {
             // [公式修复] 兼容新旧版 ChatGPT 结构
             let latex = null;
+            if (shouldSkipChatGPTPureControlNode(n)) return;
             if (n.nodeType === 1) {
                 if (consumedSourceAnchors.has(n)) return;
                 if (isIgnorableChatGPTFileReference(n)) return;
@@ -840,7 +841,7 @@
             const normalizedUrl = normalizeSourceUrl(source.url);
             if (!normalizedUrl || seen.has(normalizedUrl)) return false;
             const host = getSourceHost(source.url);
-            if (!host || /(^|\.)chatgpt\.com$|(^|\.)openai\.com$|google\.com$/.test(host)) return false;
+            if (isIgnoredCitationHost(host)) return false;
             seen.add(normalizedUrl);
             return true;
         });
@@ -1037,6 +1038,10 @@
         }
     }
 
+    function isIgnoredCitationHost(host) {
+        return !host || /(^|\.)chatgpt\.com$|google\.com$/.test(host);
+    }
+
     function isVisibleElement(el) {
         if (!el || el.nodeType !== 1) return false;
         const rect = el.getBoundingClientRect?.();
@@ -1148,7 +1153,7 @@
         const links = Array.from(popover.querySelectorAll('a[href^="http://"], a[href^="https://"]'))
             .filter(a => {
                 const host = getSourceHost(a.href);
-                return host && !/(^|\.)chatgpt\.com$|(^|\.)openai\.com$|google\.com$/.test(host);
+                return !isIgnoredCitationHost(host);
             });
 
         if (links.length) {
@@ -1915,6 +1920,74 @@
         return !!labelText && outerText === labelText;
     }
 
+    function isChatGPTThoughtToggleText(text) {
+        return /^Thought for\s+(?:(?:\d+\s*(?:h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds))\s*)+[\s›>]*$/i
+            .test(String(text || '').trim());
+    }
+
+    function isLikelyChatGPTImageControlElement(el) {
+        if (!el || el.nodeType !== 1) return false;
+        const control = el.closest?.('button, [role="button"], [aria-haspopup], [data-state]');
+        if (!control) return false;
+        if (control.querySelector?.('a[href]')) return false;
+        for (let node = control; node && node !== document.body; node = node.parentElement) {
+            const className = String(node.className || '');
+            if (node.querySelector?.('img, picture, canvas')) return true;
+            if (/\b(?:image|dalle|gizmo|generated|media)\b/i.test(className)) return true;
+        }
+        return false;
+    }
+
+    function isChatGPTPureControlText(text, el = null) {
+        const normalized = String(text || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const compact = normalized.replace(/\s+/g, '');
+        if (/^Edit$/i.test(normalized)) return isLikelyChatGPTImageControlElement(el);
+        return isChatGPTThoughtToggleText(normalized) ||
+            /^(Showmore|Showless|ShowmoreShowless)$/i.test(compact);
+    }
+
+    function hasNearbyChatGPTSourceChip(el) {
+        if (!el || el.nodeType !== 1) return false;
+        const scope = el.closest?.('p, li, td, th');
+        if (scope && Array.from(scope.querySelectorAll?.('a[href]') || []).some(isChatGPTSourceCitationAnchor)) return true;
+        const parent = el.parentElement;
+        if (!parent) return false;
+        return [el.previousElementSibling, el.nextElementSibling]
+            .filter(Boolean)
+            .some(sibling => {
+                if (sibling.matches?.('a[href]') && isChatGPTSourceCitationAnchor(sibling)) return true;
+                return Array.from(sibling.querySelectorAll?.('a[href]') || []).some(isChatGPTSourceCitationAnchor);
+            });
+    }
+
+    function shouldSkipChatGPTPureControlNode(node) {
+        const el = node?.nodeType === 1 ? node : node?.parentElement;
+        if (el?.closest?.('a[href]')) return false;
+        if (el?.querySelector?.('a[href]')) return false;
+        if (el && hasNearbyChatGPTSourceChip(el)) return false;
+        const text = node?.nodeType === 3 ? node.textContent : normalizedText(node);
+        return isChatGPTPureControlText(text, el);
+    }
+
+    function removeChatGPTPureControlNodes(root) {
+        const nodes = Array.from(root.querySelectorAll('*')).reverse();
+        nodes.forEach(node => {
+            if (shouldSkipChatGPTPureControlNode(node)) node.remove();
+        });
+    }
+
+    function cleanChatTitleText(text) {
+        return String(text || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/^(?:[👁🔎📤⏳✅❌]\uFE0F?\s*)+/u, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 60);
+    }
+
     function removeChatGPTExportChrome(root) {
         root.querySelectorAll('.cgpt-tool-group, [aria-label="Response actions"], button[aria-label="Sources"]').forEach(el => el.remove());
         root.querySelectorAll('[aria-label="Reasoning details"], [role="region"]').forEach(el => {
@@ -1994,6 +2067,7 @@
 
         Array.from(nodes).forEach(n => {
             if (['SCRIPT', 'STYLE', 'SVG'].includes(n.nodeName)) return;
+            if (shouldSkipChatGPTPureControlNode(n)) return;
             if (n.nodeType === 1 && isIgnorableChatGPTFileReference(n)) return;
 
             // [FIX] Convert tables as a single Notion table block
@@ -2166,7 +2240,7 @@
 
             children.push({
                 object: "block", type: "heading_3",
-                heading_3: { rich_text: [{ type: "text", text: { content: label } }], color: isUser ? "default" : "blue_background" }
+                heading_3: { rich_text: [{ type: "text", text: { content: label } }], color: "blue_background" }
             });
 
             const clone = turn.cloneNode(true);
@@ -2181,7 +2255,11 @@
     function getChatTitle(specificTurn = null) {
         const all = getTurnWrappers();
         const el = specificTurn || (all.find(t => getRoleFromWrapper(t) === 'user') || all[0]);
-        return el ? el.innerText.replace(/\n/g, ' ').trim().slice(0, 60) : 'ChatGPT Chat';
+        if (!el) return 'ChatGPT Chat';
+        const clone = el.cloneNode(true);
+        removeChatGPTExportChrome(clone);
+        removeChatGPTPureControlNodes(clone);
+        return cleanChatTitleText(clone.innerText || clone.textContent) || 'ChatGPT Chat';
     }
 
     function appendBlocksBatch(pageId, blocks, token, statusCallback, totalBlocks, sentBlocks) {

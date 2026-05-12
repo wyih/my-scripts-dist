@@ -9,10 +9,33 @@ const sample = `<!doctype html>
 <html>
 <head><meta charset="utf-8"></head>
 <body>
+<div data-testid="conversation-turn" data-message-author-role="user">
+  <div class="cgpt-tool-group">
+    <div class="cgpt-icon-btn"><span>👁️</span></div>
+    <div class="cgpt-icon-btn"><span>🔎</span></div>
+    <div class="cgpt-icon-btn"><span>📤</span></div>
+  </div>
+  <div class="markdown prose">
+    <p>你是不是可以连iOS Health啊</p>
+    <button>Show more</button>
+    <button>Show less</button>
+    <div>Show moreShow less</div>
+  </div>
+</div>
 <div data-testid="conversation-turn" data-message-author-role="assistant" data-message-id="dom-message-id-does-not-match-backend">
   <div class="markdown prose">
     <button>Thought for 15m 31s</button>
     <p>Reference <a href="https://ideas.repec.org/a/foo/bar.html"><span>IDEAS/RePEc</span><span>+5</span></a></p>
+    <p>Health source should keep both OpenAI Help Center URLs.
+      <a data-source-key="openai-health" class="flex overflow-hidden rounded-xl text-[9px] font-medium h-4.5 px-2 select-none" href="https://help.openai.com/zh-hans-cn/articles/6825453-chatgpt-release-notes?utm_source=chatgpt.com"><span>OpenAI Help Center</span><span>+1</span></a>
+    </p>
+    <p>Later visible Health article link should not be required for expanding the first chip:
+      <a href="https://help.openai.com/zh-hans-cn/articles/20001036-what-is-chatgpt-health?utm_source=chatgpt.com">OpenAI Help Center</a>
+    </p>
+    <div class="relative image-card">
+      <img alt="generated preview">
+      <button aria-label="Edit image">Edit</button>
+    </div>
     <table>
       <tr><th>官方出处</th></tr>
       <tr>
@@ -119,6 +142,10 @@ window.__sourceSets = {
     { label: 'Archive Source', url: 'https://example.com/archive/source-3' },
     { label: 'Archive Source', url: 'https://example.com/archive/source-4' },
     { label: 'Archive Source', url: 'https://example.com/archive/source-5' }
+  ],
+  'openai-health': [
+    { label: 'OpenAI Help Center', url: 'https://help.openai.com/zh-hans-cn/articles/6825453-chatgpt-release-notes?utm_source=chatgpt.com' },
+    { label: 'OpenAI Help Center', url: 'https://help.openai.com/zh-hans-cn/articles/20001036-what-is-chatgpt-health?utm_source=chatgpt.com' }
   ]
 };
 window.__showSourcePopover = (anchor) => {
@@ -250,11 +277,22 @@ function collectRichText(blocks) {
   return items;
 }
 
+function collectHeadings(blocks) {
+  return blocks
+    .filter(block => block.type === 'heading_3')
+    .map(block => ({
+      text: block.heading_3.rich_text.map(item => item.text.content).join(''),
+      color: block.heading_3.color
+    }));
+}
+
 (async () => {
   try {
     const btn = await waitFor(() => document.querySelector('#chatgpt-saver-btn'));
     btn.click();
     const payload = await waitFor(() => window.__captured[0]);
+    const title = payload.properties.Name.title.map(item => item.text.content).join('');
+    const headings = collectHeadings(payload.children);
     const codeBlocks = payload.children.filter(block => block.type === 'code');
     const richTextItems = collectRichText(payload.children);
     const linkTexts = [];
@@ -285,10 +323,21 @@ function collectRichText(blocks) {
       linkItems,
       allText: allTexts.join('\\n'),
       imageLikeBlockCount: imageLikeBlocks.length,
-      sourcesOpened: window.__sourcesOpened
+      sourcesOpened: window.__sourcesOpened,
+      title,
+      headings
     };
 
     const failures = [];
+    if (result.title !== '你是不是可以连iOS Health啊') {
+      failures.push('page title should strip exporter icons and pure text controls: ' + result.title);
+    }
+    if (!result.headings.some(item => item.text === 'User' && item.color === 'blue_background')) {
+      failures.push('User heading should use the same blue background as ChatGPT heading');
+    }
+    if (!result.headings.some(item => item.text === 'ChatGPT' && item.color === 'blue_background')) {
+      failures.push('ChatGPT heading should keep blue background');
+    }
     if (result.codeBlocks[0]?.language !== 'bash') failures.push('codemirror header language should map to bash');
     if (/Bash/.test(result.codeBlocks[0]?.text || '')) failures.push('codemirror header language should stay out of code text');
     if (!plainCode(codeBlocks[0]).startsWith('sudo dscacheutil')) failures.push('codemirror code should start with actual command');
@@ -316,7 +365,9 @@ function collectRichText(blocks) {
       ' / Archive Source 2',
       ' / Archive Source 3',
       ' / Archive Source 4',
-      ' / Archive Source 5'
+      ' / Archive Source 5',
+      'OpenAI Help Center 1',
+      ' / OpenAI Help Center 2'
     ];
     for (const content of expectedSourceLabels) {
       if (!result.linkItems.some(item => item.content === content)) {
@@ -344,7 +395,9 @@ function collectRichText(blocks) {
       'https://example.com/archive/source-2',
       'https://example.com/archive/source-3',
       'https://example.com/archive/source-4',
-      'https://example.com/archive/source-5'
+      'https://example.com/archive/source-5',
+      'https://help.openai.com/zh-hans-cn/articles/6825453-chatgpt-release-notes?utm_source=chatgpt.com',
+      'https://help.openai.com/zh-hans-cn/articles/20001036-what-is-chatgpt-health?utm_source=chatgpt.com'
     ]) {
       if (!linkedUrls.includes(url)) failures.push('collapsed source URL should remain linked: ' + url);
     }
@@ -379,6 +432,9 @@ function collectRichText(blocks) {
     if (!result.allText.includes('Archive Source 1 / Archive Source 2 / Archive Source 3 / Archive Source 4 / Archive Source 5')) {
       failures.push('generic +N source chip should expand all hidden popover labels');
     }
+    if (!result.allText.includes('OpenAI Help Center 1 / OpenAI Help Center 2')) {
+      failures.push('OpenAI Help Center +1 source chip should expand both OpenAI source URLs');
+    }
     if (/\\b(?:SSE|Neris CSRC|National Cyber Security Review Center|Archive Source)\\s*\\+\\d+/.test(result.allText)) {
       failures.push('expanded source labels should not leave collapsed +N text behind');
     }
@@ -393,6 +449,10 @@ function collectRichText(blocks) {
     }
     if (result.allText.includes('Sources')) failures.push('response action Sources button should stay out of exported text');
     if (result.allText.includes('Thought for 15m 31s')) failures.push('thinking toggle should stay out of exported text');
+    if (result.allText.includes('Show more') || result.allText.includes('Show less')) {
+      failures.push('pure text controls should stay out of exported text');
+    }
+    if (result.allText.includes('Edit')) failures.push('image edit control should stay out of exported text');
     if (result.allText.includes('Pro thinking hidden reasoning text')) failures.push('reasoning details should stay out of exported text');
     if (result.imageLikeBlockCount > 0) failures.push('response action favicons should stay out of exported images');
     if (window.__openedUrls.length) failures.push('source expansion should not open browser tabs: ' + window.__openedUrls.join(', '));
