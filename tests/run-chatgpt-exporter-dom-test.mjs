@@ -91,6 +91,13 @@ const sample = `<!doctype html>
     <pre><div class="code-header">Bash</div><div class="code-body"><div># 1) stop service</div><div>systemctl --user stop clipproxyapi-codex.service</div></div></pre>
     <pre><code class="language-python">print("ok")</code></pre>
     <pre><div>go test ./...</div></pre>
+    <pre class="overflow-visible! px-0!" aria-label="Plain Text">
+      <div id="code-block-viewer" dir="ltr" class="q9tKkq_viewer cm-editor">
+        <div class="cm-scroller">
+          <pre class="cm-content q9tKkq_readonly m-0"><code><span>会计确认与计量</span><br><span>列报与披露</span><br><span>监管关注口径</span></code></pre>
+        </div>
+      </div>
+    </pre>
   </div>
   <div class="z-0 flex min-h-[46px] justify-start">
     <div aria-label="Response actions" class="flex flex-wrap items-center" role="group" tabindex="-1">
@@ -347,6 +354,10 @@ function collectHeadings(blocks) {
     if (result.codeBlocks[2]?.language !== 'python') failures.push('language-* class should still map to python');
     if (result.codeBlocks[3]?.language !== 'plain text') failures.push('plain command block should stay plain text');
     if (!plainCode(codeBlocks[3]).includes('go test ./...')) failures.push('plain command block should keep its first line');
+    if (result.codeBlocks[4]?.language !== 'plain text') failures.push('codemirror plain text block should stay plain text');
+    if (plainCode(codeBlocks[4]) !== '会计确认与计量\\n列报与披露\\n监管关注口径') {
+      failures.push('codemirror plain text block should preserve visual line breaks');
+    }
     if (result.linkTexts.includes('IDEAS/RePEc+5') || result.linkTexts.some(text => /^\\+\\d+$/.test(text))) {
       failures.push('citation marker should stay out of link text');
     }

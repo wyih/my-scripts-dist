@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.26
+// @version      2.27
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -22,7 +22,7 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.26] script loaded');
+    console.log('[ChatGPT→Notion v2.27] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -366,25 +366,42 @@
         return preNode.querySelector('.cm-content, [class*="cm-content"], #code-block-viewer .cm-content');
     }
 
+    const CODE_LINE_TAGS = new Set(['DIV', 'P', 'LI', 'TR']);
+
+    function isCodeMirrorLineElement(node, contentEl) {
+        if (!node || node.nodeType !== 1) return false;
+        const className = String(node.className || '');
+        return /\bcm-line\b/.test(className) ||
+            (node.parentElement === contentEl && CODE_LINE_TAGS.has(node.tagName));
+    }
+
     function readCodeMirrorText(contentEl) {
         let output = '';
+        function appendLineBreak() {
+            output = output.replace(/[ \t]+$/g, '');
+            if (output && !output.endsWith('\n')) output += '\n';
+        }
         function walk(node) {
             if (node.nodeType === 3) {
-                output += node.textContent || '';
+                const text = node.textContent || '';
+                const parentClass = String(node.parentElement?.className || '');
+                if (!text.trim() && !/\bcm-line\b/.test(parentClass)) return;
+                output += text;
                 return;
             }
             if (node.nodeType !== 1) return;
             if (node.tagName === 'BR') {
-                output += '\n';
+                appendLineBreak();
                 return;
             }
+            const isLine = isCodeMirrorLineElement(node, contentEl);
+            const before = output.length;
             node.childNodes.forEach(walk);
+            if (isLine && output.length > before) appendLineBreak();
         }
         contentEl.childNodes.forEach(walk);
         return output.replace(/\u00A0/g, ' ').replace(/[ \t]+\n/g, '\n').trim();
     }
-
-    const CODE_LINE_TAGS = new Set(['DIV', 'P', 'LI', 'TR']);
 
     function readCodeTextWithLineBreaks(root) {
         let output = '';
@@ -486,11 +503,11 @@
     }
 
     function extractCodeText(preNode, language) {
-        const code = preNode.querySelector('code');
-        if (code) return code.textContent || "";
-
         const cmContent = findCodeMirrorContent(preNode);
         if (cmContent) return readCodeMirrorText(cmContent);
+
+        const code = preNode.querySelector('code');
+        if (code) return code.textContent || "";
 
         const clone = preNode.cloneNode(true);
         clone.querySelectorAll('button, svg, [aria-hidden="true"], .sr-only').forEach(el => el.remove());
