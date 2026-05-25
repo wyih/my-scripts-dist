@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.27
+// @version      2.28
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -22,7 +22,7 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.27] script loaded');
+    console.log('[ChatGPT→Notion v2.28] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -608,6 +608,10 @@
                 }
             } else if (n.nodeType === 1) {
                 const ns = { ...s };
+                if (n.tagName === 'BR') {
+                    rt.push(makeTextRichText('\n', s, s.link));
+                    return;
+                }
                 if (['B', 'STRONG'].includes(n.tagName)) ns.bold = true;
                 if (['I', 'EM'].includes(n.tagName)) ns.italic = true;
                 if (n.tagName === 'A' && n.href && n.href.trim() !== '') {

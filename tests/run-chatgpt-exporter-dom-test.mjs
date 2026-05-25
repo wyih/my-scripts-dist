@@ -32,6 +32,9 @@ const sample = `<!doctype html>
     <p>Later visible Health article link should not be required for expanding the first chip:
       <a href="https://help.openai.com/zh-hans-cn/articles/20001036-what-is-chatgpt-health?utm_source=chatgpt.com">OpenAI Help Center</a>
     </p>
+    <blockquote>
+      <p><strong>regulatory salience of accounting implementation issues</strong><br>会计准则实施问题的监管显著性 / 制度化关注度。</p>
+    </blockquote>
     <div class="relative image-card">
       <img alt="generated preview">
       <button aria-label="Edit image">Edit</button>
@@ -266,6 +269,7 @@ function plainCode(block) {
 function getBlockRichText(block) {
   return block.paragraph?.rich_text
     || block.heading_3?.rich_text
+    || block.quote?.rich_text
     || block.bulleted_list_item?.rich_text
     || block.numbered_list_item?.rich_text
     || [];
@@ -357,6 +361,9 @@ function collectHeadings(blocks) {
     if (result.codeBlocks[4]?.language !== 'plain text') failures.push('codemirror plain text block should stay plain text');
     if (plainCode(codeBlocks[4]) !== '会计确认与计量\\n列报与披露\\n监管关注口径') {
       failures.push('codemirror plain text block should preserve visual line breaks');
+    }
+    if (!result.allText.includes('regulatory salience of accounting implementation issues\\n会计准则实施问题的监管显著性 / 制度化关注度。')) {
+      failures.push('blockquote br should preserve inline line break');
     }
     if (result.linkTexts.includes('IDEAS/RePEc+5') || result.linkTexts.some(text => /^\\+\\d+$/.test(text))) {
       failures.push('citation marker should stay out of link text');
