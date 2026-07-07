@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         Sosad TXT Downloader
-// @name:zh-CN   废文网 TXT 下载器
+// @name         废文网 TXT 下载器
+// @name:en      Sosad TXT Downloader
 // @namespace    http://tampermonkey.net/
-// @version      0.1.0
-// @description  sosad.fun profile page TXT exporter with hidden watermark filtering
-// @description:zh-CN  在废文网小说目录页导出干净 TXT，按可见性过滤零字号和隐藏水印文本。
+// @version      0.1.1
+// @description  在废文网小说目录页导出干净 TXT，按可见性过滤零字号和隐藏水印文本。
+// @description:en  sosad.fun profile page TXT exporter with hidden watermark filtering.
 // @author       Wyih
 // @license      MIT
 // @match        https://sosad.fun/threads/*/profile*
