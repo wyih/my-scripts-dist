@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.28
+// @version      2.29
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -22,7 +22,7 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.28] script loaded');
+    console.log('[ChatGPT→Notion v2.29] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -551,37 +551,38 @@
         return chunks;
     }
 
-    // ------------------- 5. DOM 转 Blocks (修复公式版) -------------------
+    // 新版源码在 role="math" 外层；旧版仍支持 data-latex-source 和 MathML annotation。
+    function getMathSource(node) {
+        if (node.nodeType !== 1) return null;
+        const source = node.getAttribute('data-math-source') || node.getAttribute('data-latex-source');
+        if (source) return source;
+        if (node.matches('.katex, .katex-display')) {
+            const sourceNode = node.querySelector('[data-math-source], [data-latex-source]');
+            return (sourceNode && getMathSource(sourceNode)) ||
+                node.querySelector('annotation[encoding="application/x-tex"]')?.textContent || null;
+        }
+        return null;
+    }
 
+    function isDisplayMath(node) {
+        return node.nodeType === 1 && (node.classList.contains('katex-display') ||
+            (node.matches('[data-math-source], [data-latex-source]') &&
+                (node.style.display === 'block' || !!node.querySelector('.katex-display'))));
+    }
 
     // 1. 解析行内节点 (Text & Inline Equation)
     function parseInlineNodes(nodes) {
         const rt = [];
         const consumedSourceAnchors = new WeakSet();
         function tr(n, s = {}) {
-            // [公式修复] 兼容新旧版 ChatGPT 结构
-            let latex = null;
             if (shouldSkipChatGPTPureControlNode(n)) return;
             if (n.nodeType === 1) {
                 if (consumedSourceAnchors.has(n)) return;
                 if (isIgnorableChatGPTFileReference(n)) return;
-
-                // 1. 优先尝试：标准属性
-                if (n.hasAttribute('data-latex-source')) {
-                    latex = n.getAttribute('data-latex-source');
-                }
-                // 2. 备选尝试：从 annotation 标签提取 (针对新版界面)
-                else if (n.classList.contains('katex')) {
-                    const ann = n.querySelector('annotation[encoding="application/x-tex"]');
-                    if (ann) latex = ann.textContent;
-                }
             }
 
-            // === 关键修改 START ===
-            // 只要提取到了 LaTeX，就直接存为 Equation 对象。
-            // 删除了 !n.classList.contains('katex-display') 和 !n.closest('.katex-display') 的限制。
-            // 理由：能流进这里的 katex-display，说明它被包裹在其他标签里，没被 processNodesToBlocks 捕获。
-            // 我们应该把它当做行内公式提取出来，而不是丢弃。
+            // 表格、列表和引用中的公式也必须在跳过 KaTeX 渲染节点前提取。
+            const latex = getMathSource(n);
             if (latex) {
                 rt.push({
                     type: "equation",
@@ -589,7 +590,6 @@
                 });
                 return; // 停止递归子节点
             }
-            // === 关键修改 END ===
 
             // [公式修复] 忽略 KaTeX 的渲染杂项，防止乱码
             if (n.nodeType === 1 && (n.classList.contains('katex-html') || n.classList.contains('katex-mathml'))) {
@@ -2106,22 +2106,9 @@
             // [公式修复] 忽略 KaTeX 辅助元素
             if (n.classList && (n.classList.contains('katex-mathml') || n.classList.contains('katex-html'))) return;
             // [公式修复] 检测块级公式 (Block Equation)
-            if (n.classList && n.classList.contains('katex-display')) {
+            if (isDisplayMath(n)) {
                 flush(); // 之前的文本存为一段
-
-                let latex = null;
-                // 1. 优先查找属性
-                const sourceNode = n.hasAttribute('data-latex-source') ? n : n.querySelector('[data-latex-source]');
-                if (sourceNode) {
-                    latex = sourceNode.getAttribute('data-latex-source');
-                }
-
-                // 2. 备选查找：如果没找到，尝试查找 annotation 标签 (新增逻辑)
-                if (!latex) {
-                    const ann = n.querySelector('annotation[encoding="application/x-tex"]');
-                    if (ann) latex = ann.textContent;
-                }
-
+                const latex = getMathSource(n);
                 if (latex) {
                     blocks.push({
                         object: "block",
@@ -2133,12 +2120,6 @@
             }
 
             if (n.nodeType === 3 || ['B', 'I', 'CODE', 'SPAN', 'A', 'STRONG', 'EM'].includes(n.nodeName)) {
-                // [公式修复] 如果是行内公式容器，推入 buf 交给 parseInlineNodes
-                if (n.nodeName === 'SPAN' && n.hasAttribute('data-latex-source') && !n.classList.contains('katex-display')) {
-                    buf.push(n);
-                    return;
-                }
-
                 if (n.nodeName === 'A' && (n.hasAttribute('download') || n.href.includes('blob:'))) {
                     flush();
                     const fn = (n.innerText || 'file').trim();

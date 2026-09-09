@@ -5,6 +5,74 @@ import { spawnSync } from 'node:child_process';
 
 const script = readFileSync(new URL('../ChatGPT exporter.js', import.meta.url), 'utf8');
 
+// Sources and outer wrappers observed in the last reply of the shared conversation,
+// 2026-09-09. KaTeX now renders HTML only; the source lives on its parent span.
+const mathCases = [
+  ['block', String.raw`DownsideSpecific_q
+=
+Downside_q\times Specific_q.`],
+  ['block', String.raw`Y_{it}
+=
+\alpha_i+\lambda_t+
+\beta(ChiNext_i\times Post_t)
++\Gamma X_{it}+\varepsilon_{it}.`],
+  ['inline', 'j'], ['inline', 'i'], ['inline', 't'],
+  ['block', String.raw`\begin{aligned}
+Visit_{jit}
+=&\ \alpha_{ji}+\mu_{jt}+\nu_{it}\\
+&+\theta(ChiNext_i\times Post_t\times Exposure^{pre}_{ji})\\
+&+\rho(Post_t\times Exposure^{pre}_{ji})+\varepsilon_{jit}.
+\end{aligned}`],
+  ['inline', String.raw`\alpha_{ji}`],
+  ['inline', String.raw`\mu_{jt}`],
+  ['inline', String.raw`\nu_{it}`],
+  ['inline', 'Exposure^{pre}_{ji}'],
+  ['block', String.raw`\text{结构化财务事实}
+\rightarrow
+\text{匹配MD\&A相关段落}
+\rightarrow
+\text{识别承认、原因、量化与前瞻性表述}.`],
+  ['block', String.raw`Narrative_{ir}
+=
+\alpha_i+\lambda_r+
+\beta(ChiNext_i\times Post_r)
++\Gamma X_{ir}+\varepsilon_{ir}.`],
+  ['block', String.raw`ChiNext\times Post\times BadPerformance`],
+  ['block', 'Binding_i^{pre}.'],
+  ['block', String.raw`Y_{it}
+=
+\alpha_i+\lambda_{Board\times t}
++\gamma_t Binding_i^{pre}
++\beta(ChiNext_i\times Post_t\times Binding_i^{pre})
++\varepsilon_{it}.`]
+];
+const escapeHtml = text => text.replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+function currentMath([kind, expression]) {
+  const rendered = '<span class="katex"><span class="katex-html" aria-hidden="true">RENDERED_MATH_SHOULD_NOT_LEAK</span></span>';
+  return `<span role="math" aria-label="${escapeHtml(expression)}" data-math-source="${escapeHtml(expression)}" data-client-katex-layout=""${kind === 'block' ? ' style="display: block;"' : ''}>${kind === 'block' ? `<span class="katex-display">${rendered}</span>` : rendered}</span>`;
+}
+const mathFixture = `
+  <div>${currentMath(mathCases[0])}</div>
+  <div>${currentMath(mathCases[1])}</div>
+  <p>设机构为 ${currentMath(mathCases[2])}、公司为 ${currentMath(mathCases[3])}、时期为 ${currentMath(mathCases[4])}：</p>
+  <div>${currentMath(mathCases[5])}</div>
+  <ul>${mathCases.slice(6, 10).map(item => `<li><p>${currentMath(item)}：固定效应或暴露变量。</p></li>`).join('')}</ul>
+  ${mathCases.slice(10).map(item => `<div>${currentMath(item)}</div>`).join('')}
+  <h2>标题 ${currentMath(['inline', 'h_1'])}</h2>
+  <blockquote><p>引用 ${currentMath(['inline', 'q_1'])}<br>继续引用</p></blockquote>
+  <table><tr><th>变量</th><th>公式</th></tr><tr><td>表格</td><td>之前 ${currentMath(['inline', String.raw`\frac{a}{b}`])} 之后</td></tr></table>
+  <p>旧属性 <span data-latex-source="x_1"><span class="katex-html">RENDERED_MATH_SHOULD_NOT_LEAK</span></span></p>
+  <span class="katex-display"><span data-latex-source="x_2"><span class="katex-html">RENDERED_MATH_SHOULD_NOT_LEAK</span></span></span>
+  <p>旧 MathML <span class="katex"><span class="katex-mathml"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x_3</annotation></semantics></math></span><span class="katex-html">RENDERED_MATH_SHOULD_NOT_LEAK</span></span></p>
+  <span class="katex-display"><span class="katex"><span class="katex-mathml"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x_4</annotation></semantics></math></span><span class="katex-html">RENDERED_MATH_SHOULD_NOT_LEAK</span></span></span>
+  <p>重复变量 ${currentMath(['inline', 'j'])}，再次出现 ${currentMath(['inline', 'j'])}。</p>
+`;
+const expectedMath = [...mathCases,
+  ['inline', 'h_1'], ['inline', 'q_1'], ['inline', String.raw`\frac{a}{b}`],
+  ['inline', 'x_1'], ['block', 'x_2'], ['inline', 'x_3'], ['block', 'x_4'],
+  ['inline', 'j'], ['inline', 'j']
+];
+
 const sample = `<!doctype html>
 <html>
 <head><meta charset="utf-8"></head>
@@ -116,6 +184,9 @@ const sample = `<!doctype html>
     </div>
   </div>
   <section role="region" aria-label="Reasoning details">Pro thinking hidden reasoning text</section>
+</div>
+<div id="math-regression" data-testid="conversation-turn" data-message-author-role="assistant">
+  <div class="markdown prose">${mathFixture}</div>
 </div>
 <template id="source-panel-template">
   <section aria-label="Sources panel">
@@ -267,12 +338,13 @@ function plainCode(block) {
 }
 
 function getBlockRichText(block) {
-  return block.paragraph?.rich_text
-    || block.heading_3?.rich_text
-    || block.quote?.rich_text
-    || block.bulleted_list_item?.rich_text
-    || block.numbered_list_item?.rich_text
-    || [];
+  return block[block.type]?.rich_text || [];
+}
+
+function collectMath(blocks) {
+  return blocks.flatMap(block => block.type === 'equation'
+    ? [['block', block.equation.expression]]
+    : collectRichText([block]).filter(item => item.type === 'equation').map(item => ['inline', item.equation.expression]));
 }
 
 function collectRichText(blocks) {
@@ -340,6 +412,23 @@ function collectHeadings(blocks) {
     };
 
     const failures = [];
+    const expectedMath = ${JSON.stringify(expectedMath)};
+    result.math = collectMath(payload.children);
+    if (JSON.stringify(result.math) !== JSON.stringify(expectedMath)) {
+      failures.push('full export should preserve every math source, order, and inline/block kind');
+    }
+    if (result.allText.includes('RENDERED_MATH_SHOULD_NOT_LEAK')) {
+      failures.push('KaTeX rendering should not duplicate the exported equations');
+    }
+    const variableParagraph = payload.children.find(block => block.paragraph?.rich_text.some(item => item.text?.content.includes('设机构为')));
+    const variableText = getBlockRichText(variableParagraph || {}).map(item => item.text?.content ?? item.equation?.expression).join('');
+    if (variableText !== '设机构为 j、公司为 i、时期为 t：') {
+      failures.push('inline variables should stay in their surrounding paragraph: ' + variableText);
+    }
+    const cell = payload.children.filter(block => block.type === 'table').at(-1)?.table.children[1]?.table_row.cells[1];
+    if (!cell?.some(item => item.type === 'equation' && item.equation.expression === expectedMath[17][1])) {
+      failures.push('table cell should retain its equation as rich text');
+    }
     if (result.title !== '你是不是可以连iOS Health啊') {
       failures.push('page title should strip exporter icons and pure text controls: ' + result.title);
     }
@@ -474,6 +563,12 @@ function collectHeadings(blocks) {
     if (result.allText.includes('Pro thinking hidden reasoning text')) failures.push('reasoning details should stay out of exported text');
     if (result.imageLikeBlockCount > 0) failures.push('response action favicons should stay out of exported images');
     if (window.__openedUrls.length) failures.push('source expansion should not open browser tabs: ' + window.__openedUrls.join(', '));
+
+    document.querySelector('#math-regression [title="单条导出"]').click();
+    const singlePayload = await waitFor(() => window.__captured[1]);
+    if (JSON.stringify(collectMath(singlePayload.children)) !== JSON.stringify(expectedMath)) {
+      failures.push('single-answer export should preserve the same equations as full export');
+    }
 
     document.body.innerHTML = '<pre id="out">' + JSON.stringify({ ok: failures.length === 0, failures, result }, null, 2)
       .replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch])) + '</pre>';
