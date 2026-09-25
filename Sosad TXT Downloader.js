@@ -2,7 +2,7 @@
 // @name         废文网 TXT 下载器
 // @name:en      Sosad TXT Downloader
 // @namespace    http://tampermonkey.net/
-// @version      0.1.1
+// @version      0.1.2
 // @description  在废文网小说目录页导出干净 TXT，按可见性过滤零字号和隐藏水印文本。
 // @description:en  sosad.fun profile page TXT exporter with hidden watermark filtering.
 // @author       Wyih
@@ -72,18 +72,31 @@
   }
 
   function collectChapterLinks() {
-    const anchors = Array.from(document.querySelectorAll('table tr th:first-child a[href*="/posts/"], table tr td:first-child a[href*="/posts/"]'));
-    const fallbackAnchors = anchors.length
-      ? anchors
-      : Array.from(document.querySelectorAll('a[href*="/posts/"]')).filter(a => /^\d+\./.test(normalizeSpaces(a.textContent)));
-
     const seen = new Set();
-    return fallbackAnchors
-      .map(a => ({
-        title: normalizeSpaces(a.textContent),
-        url: new URL(a.getAttribute('href'), location.href).href
-      }))
-      .filter(item => item.title && /^\d+\./.test(item.title))
+    const chapters = [];
+    for (const row of document.querySelectorAll('table tr')) {
+      const firstLink = row.cells[0]?.querySelector('a[href*="/posts/"]');
+      if (!firstLink) continue;
+
+      const url = new URL(firstLink.getAttribute('href'), location.href).href;
+      if (seen.has(url)) continue;
+
+      const numberOrTitle = normalizeSpaces(firstLink.textContent);
+      const titleLink = row.cells[1]?.querySelector('a[href*="/posts/"]');
+      const subtitle = titleLink?.href === url ? normalizeSpaces(titleLink.textContent) : '';
+      const title = /^\d+$/.test(numberOrTitle) && subtitle
+        ? `${numberOrTitle}.${subtitle}`
+        : numberOrTitle;
+      if (!title) continue;
+
+      chapters.push({ title, url });
+      seen.add(url);
+    }
+
+    if (chapters.length) return chapters;
+    return Array.from(document.querySelectorAll('a[href*="/posts/"]'))
+      .filter(a => /^\d+\./.test(normalizeSpaces(a.textContent)))
+      .map(a => ({ title: normalizeSpaces(a.textContent), url: new URL(a.getAttribute('href'), location.href).href }))
       .filter(item => {
         if (seen.has(item.url)) return false;
         seen.add(item.url);
@@ -206,7 +219,11 @@
 
   function parseChapterHtml(html, fallbackTitle) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
-    const chapterName = textOf('strong.h3', doc) || fallbackTitle;
+    const heading = textOf('strong.h3', doc);
+    const subtitle = textOf('strong.h5', doc);
+    const chapterName = subtitle && heading
+      ? `${heading}.${subtitle}`
+      : (heading && !/^\d+$/.test(heading) ? heading : fallbackTitle);
     const contentRoot = doc.querySelector('.main-text.no-selection > span[id^="full"], .main-text span[id^="full"]');
     if (!contentRoot) {
       throw new Error(`找不到章节正文：${chapterName || fallbackTitle}`);
