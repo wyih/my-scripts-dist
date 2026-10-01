@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.29
+// @version      2.30
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
 // @author       Wyih
@@ -22,7 +22,9 @@
 (function () {
     'use strict';
 
-    console.log('[ChatGPT→Notion v2.29] script loaded');
+    if (window.top !== window.self) return;
+
+    console.log('[ChatGPT→Notion v2.30] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -2413,6 +2415,16 @@
 
     function tryInit() {
         if (!document.body) return;
+        if (/^\/dots(?:\/|$)/.test(location.pathname)) {
+            document.getElementById('chatgpt-saver-btn')?.remove();
+            document.querySelectorAll('.cgpt-tool-group').forEach(group => group.remove());
+            document.querySelectorAll('.cgpt-turn').forEach(turn => {
+                turn.classList.remove('cgpt-turn');
+                turn.removeAttribute('data-role');
+                turn.removeAttribute('data-privacy-skip');
+            });
+            return;
+        }
         if (!document.getElementById('chatgpt-saver-btn')) {
             const btn = document.createElement('button');
             btn.id = 'chatgpt-saver-btn'; btn.textContent = '📥 Save to Notion'; btn.onclick = handleFullExport;
