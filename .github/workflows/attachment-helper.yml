@@ -1,0 +1,29 @@
+name: Attachment helper
+
+on:
+  push:
+    paths:
+      - 'notion-attachment-helper/**'
+      - 'tests/test_notion_attachment_helper.py'
+      - '.github/workflows/attachment-helper.yml'
+  pull_request:
+    paths:
+      - 'notion-attachment-helper/**'
+      - 'tests/test_notion_attachment_helper.py'
+      - '.github/workflows/attachment-helper.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: python -m unittest discover -s tests -p test_notion_attachment_helper.py -v

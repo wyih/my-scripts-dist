@@ -4,6 +4,33 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const script = readFileSync(new URL('../ChatGPT exporter.js', import.meta.url), 'utf8');
+// An optional saved page exercises the same assertions against real page markup.
+const savedPage = process.argv[2] ? readFileSync(process.argv[2], 'utf8') : null;
+const modernUser = (index, text) => `
+  <div class="group/user-message flex flex-col items-end gap-2" data-chatgpt-search-unit-key="fallback-turn-${index}:0:user" data-chatgpt-search-message-ids="user-${index}">
+    <div><button aria-label="uploaded.docx">uploaded.docx</button></div>
+    <div data-content-search-unit-key="fallback-turn-${index}:0:user">
+      <div class="group/user-message flex w-full flex-col gap-1 items-end">
+        <div data-user-message-bubble="true"><p>${text}</p></div>
+        <div class="turn-action-controls"><button>Edit question</button></div>
+      </div>
+    </div>
+  </div>`;
+const modernAssistant = (index, text) => `
+  <div data-content-search-unit-key="fallback-turn-${index}:2:assistant" data-chatgpt-search-unit-key="fallback-turn-${index}:2:assistant" data-chatgpt-search-message-ids="assistant-${index} assistant-${index}">
+    <h4 class="sr-only" data-conversation-role="assistant">ChatGPT 说：</h4>
+    <div><div class="group flex min-w-0 flex-col" data-chatgpt-selection-message-id="assistant-${index}">
+      <div data-markdown-text-style="assistant-message"><p>${text}</p></div>
+      <div class="turn-action-controls"><button>Copy answer</button><img src="https://example.com/action-icon.png"></div>
+    </div></div>
+  </div>`;
+// Actual nesting from the 2026-10-07 page: one data-turn-key wraps both roles.
+// The middle question has no answer, so exporting it must stop at the next user.
+const modernFixture = `<div data-thread-find-target="conversation">
+  <div data-turn-key="user-0">${modernUser(0, 'QUESTION_A')}<div>Activity outside the reply</div>${modernAssistant(0, 'ANSWER_A')}</div>
+  <div data-turn-key="user-1">${modernUser(1, 'QUESTION_WITHOUT_ANSWER')}</div>
+  <div data-turn-key="user-2">${modernUser(2, 'QUESTION_B')}${modernAssistant(2, 'ANSWER_B')}</div>
+</div>`;
 
 // Sources and outer wrappers observed in the last reply of the shared conversation,
 // 2026-09-09. KaTeX now renders HTML only; the source lives on its parent span.
@@ -136,6 +163,7 @@ const sample = `<!doctype html>
       <p class="not-prose mt-0! mb-0! flex-auto truncate">20260427133441-王翼虹预定的会议-转写智能优化版…</p>
     </div>
     <p>Keep this sentence after the file reference.</p>
+    <p>Keep inline text before the library reference.<span class="inline-flex"><span data-state="closed"><span data-search-result-target><button data-testid="chatgpt-library-file-citation" aria-label="打开 uploaded-source.docx 的预览"><span class="min-w-0 flex-auto truncate">UPLOADED_SOURCE_CITATION</span></button></span></span></span> Keep inline text after the library reference.</p>
     <pre class="overflow-visible! px-0!" data-start="133" data-end="206">
       <div class="relative w-full mt-4 mb-1">
         <div class="border border-token-border-light rounded-3xl">
@@ -201,6 +229,20 @@ window.__captured = [];
 window.__cgptTestConversationId = 'test-conversation';
 window.__openedUrls = [];
 window.__sourcesOpened = 0;
+window.__helperRequests = [];
+window.__helperEvents = [];
+window.__downloadClicks = [];
+document.addEventListener('click', event => {
+  const control = event.target.closest?.('button[aria-label="下载文件"]');
+  if (control) {
+    const filename = control.closest('[class~="group/resource-row"]')?.querySelector('[title]')?.title;
+    window.__downloadClicks.push(filename);
+    window.__helperEvents.push('download:' + filename);
+  }
+}, true);
+window.__helperOffline = false;
+window.__gmValues = { notion_token: 'token', notion_db_id: 'dbid' };
+window.__gmMenus = new Map();
 window.open = (url) => { window.__openedUrls.push(url); return null; };
 window.__sourceIndex = 0;
 window.__sourceSets = {
@@ -294,10 +336,14 @@ document.addEventListener('keydown', event => {
   window.__sourceIndex = Math.min(window.__sourceIndex + 1, window.__activeSourceSources.length - 1);
   window.__renderSourcePopover();
 });
-window.GM_getValue = (key, fallback) => key === 'notion_token' ? 'token' : key === 'notion_db_id' ? 'dbid' : fallback;
-window.GM_setValue = () => {};
-window.GM_registerMenuCommand = () => {};
-window.GM_addStyle = () => {};
+window.GM_getValue = (key, fallback) => key in window.__gmValues ? window.__gmValues[key] : fallback;
+window.GM_setValue = (key, value) => { window.__gmValues[key] = value; };
+window.GM_registerMenuCommand = (name, handler) => { window.__gmMenus.set(name, handler); };
+window.GM_addStyle = css => {
+  const style = document.createElement('style');
+  style.textContent = css;
+  document.head.appendChild(style);
+};
 window.fetch = async (url) => {
   if (String(url).includes('/backend-api/conversation/')) {
     return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
@@ -307,6 +353,25 @@ window.fetch = async (url) => {
 window.prompt = () => '';
 window.alert = (msg) => { window.__alert = msg; };
 window.GM_xmlhttpRequest = (req) => {
+  if (req.url === 'http://127.0.0.1:36678/health') {
+    window.__helperEvents.push('health');
+    if (window.__helperOffline) { req.onerror({}); return; }
+    req.onload({ status: 200, responseText: JSON.stringify({ service: 'chatgpt-notion-attachments', version: 2 }) });
+    return;
+  }
+  if (req.url === 'http://127.0.0.1:36678/upload') {
+    window.__helperEvents.push('upload');
+    const data = JSON.parse(req.data);
+    window.__helperRequests.push(data);
+    if (window.__helperOffline) { req.onerror({}); return; }
+    req.onload({ status: 200, responseText: JSON.stringify({ results: data.files.map(file => ({
+      filename: file.filename,
+      status: file.filename === 'large.pdf' ? 'skipped' : 'uploaded',
+      reason: file.filename === 'large.pdf' ? '超过自动上传大小限制（5 MiB）' : '',
+      file_upload_id: file.filename === 'large.pdf' ? '' : 'test-upload-id'
+    })) }) });
+    return;
+  }
   if (req.url.includes('/v1/pages')) {
     window.__captured.push(JSON.parse(req.data));
     req.onload({ status: 200, responseText: JSON.stringify({ id: 'page1' }) });
@@ -314,6 +379,11 @@ window.GM_xmlhttpRequest = (req) => {
   }
   if (req.url.includes('/heartbeat')) {
     if (req.onerror) req.onerror({});
+    return;
+  }
+  if (req.method === 'PATCH' && req.url.includes('/children')) {
+    window.__captured.at(-1).children.push(...JSON.parse(req.data).children);
+    req.onload({ status: 200, responseText: '{}' });
     return;
   }
   if (req.onerror) req.onerror({});
@@ -554,6 +624,9 @@ function collectHeadings(blocks) {
     if (!result.allText.includes('Keep this sentence after the file reference.')) {
       failures.push('text after file reference should remain');
     }
+    if (result.allText.includes('UPLOADED_SOURCE_CITATION') || !result.allText.includes('Keep inline text before the library reference.') || !result.allText.includes('Keep inline text after the library reference.')) {
+      failures.push('modern uploaded-file references should be omitted while keeping surrounding body text');
+    }
     if (result.allText.includes('Sources')) failures.push('response action Sources button should stay out of exported text');
     if (result.allText.includes('Thought for 15m 31s')) failures.push('thinking toggle should stay out of exported text');
     if (result.allText.includes('Show more') || result.allText.includes('Show less')) {
@@ -569,6 +642,189 @@ function collectHeadings(blocks) {
     if (JSON.stringify(collectMath(singlePayload.children)) !== JSON.stringify(expectedMath)) {
       failures.push('single-answer export should preserve the same equations as full export');
     }
+
+    document.body.innerHTML = ${JSON.stringify(modernFixture)};
+    await waitFor(() => document.querySelectorAll('.cgpt-tool-group').length === 5);
+    const modernTurns = Array.from(document.querySelectorAll('.cgpt-turn'));
+    const roles = modernTurns.map(turn => turn.getAttribute('data-role'));
+    if (roles.join(',') !== 'user,assistant,user,user,assistant') {
+      failures.push('modern nested messages should have separate roles in DOM order: ' + roles);
+    }
+    if (document.querySelector('[data-turn-key].cgpt-turn')) {
+      failures.push('a modern question-and-answer container should not count as a single bubble');
+    }
+    if (document.querySelectorAll('[title="单条导出"]').length !== 5 || document.querySelectorAll('[title="一问一答导出"]').length !== 3) {
+      failures.push('each bubble needs a single export; each user question needs a pair export');
+    }
+    // Repeated initialization and a removed toolbar should not create duplicates.
+    modernTurns[1].querySelector('.cgpt-tool-group').remove();
+    await waitFor(() => modernTurns[1].querySelector('.cgpt-tool-group'));
+    if (document.querySelectorAll('.cgpt-tool-group').length !== 5) {
+      failures.push('polling should restore removed controls without duplicating other toolbars');
+    }
+    const exportBubble = async (turn, title) => {
+      const count = window.__captured.length;
+      const control = turn.querySelector('[title="' + title + '"]');
+      control.click();
+      await waitFor(() => window.__captured[count] && control.classList.contains('success'));
+      return window.__captured[count];
+    };
+    const contentText = payload => collectRichText(payload.children).map(item => item.text?.content || '').join('');
+    const exportedRoles = payload => collectHeadings(payload.children).filter(item => item.color === 'blue_background').map(item => item.text).join(',');
+    const questionPayload = await exportBubble(modernTurns[0], '单条导出');
+    if (exportedRoles(questionPayload) !== 'User' || contentText(questionPayload).includes('ANSWER_A')) {
+      failures.push('single-question export should contain only the selected user message');
+    }
+    if (questionPayload.properties.Name.title[0].text.content !== 'QUESTION_A') {
+      failures.push('a question title should come from its bubble, before any attachment filename');
+    }
+    const answerPayload = await exportBubble(modernTurns[1], '单条导出');
+    if (exportedRoles(answerPayload) !== 'ChatGPT' || !contentText(answerPayload).includes('ANSWER_A') || /QUESTION_A|ChatGPT 说|Copy answer/.test(contentText(answerPayload))) {
+      failures.push('single-answer export should contain the reply without question or UI labels');
+    }
+    if (answerPayload.children.some(block => block.type === 'image')) {
+      failures.push('modern response action icons should not be uploaded as reply images');
+    }
+    const pairPayload = await exportBubble(modernTurns[0], '一问一答导出');
+    if (exportedRoles(pairPayload) !== 'User,ChatGPT' || !contentText(pairPayload).includes('ANSWER_A') || /QUESTION_B|ANSWER_B|Activity outside/.test(contentText(pairPayload))) {
+      failures.push('pair export should contain exactly the selected question and its answer');
+    }
+    const unansweredPayload = await exportBubble(modernTurns[2], '一问一答导出');
+    if (exportedRoles(unansweredPayload) !== 'User' || /QUESTION_B|ANSWER_B/.test(contentText(unansweredPayload))) {
+      failures.push('an unanswered question must not pair with a later question or answer');
+    }
+    modernTurns[1].querySelector('[title="切换隐私"]').click();
+    const privatePair = await exportBubble(modernTurns[0], '一问一答导出');
+    if (exportedRoles(privatePair) !== 'User' || contentText(privatePair).includes('ANSWER_A')) {
+      failures.push('a private answer should stay out of a pair export');
+    }
+    modernTurns[1].querySelector('[title="切换隐私"]').click();
+    await waitFor(() => modernTurns[0].querySelector('[title="一问一答导出"] span').textContent === '🔗');
+
+    // Content-only fallbacks also need controls when search-unit metadata is absent.
+    const dynamicTurn = document.createElement('div');
+    dynamicTurn.innerHTML = '<div data-user-message-bubble="true"><p>DYNAMIC_QUESTION</p></div><div data-chatgpt-selection-message-id="dynamic-answer"><div data-markdown-text-style="assistant-message"><p>DYNAMIC_ANSWER</p></div></div>';
+    document.querySelector('[data-thread-find-target]').appendChild(dynamicTurn);
+    await waitFor(() => dynamicTurn.querySelectorAll('.cgpt-tool-group').length === 2);
+    const dynamicPair = await exportBubble(dynamicTurn.firstElementChild, '一问一答导出');
+    if (exportedRoles(dynamicPair) !== 'User,ChatGPT' || !contentText(dynamicPair).includes('DYNAMIC_ANSWER')) {
+      failures.push('newly rendered content-only bubbles should support pair export');
+    }
+    const fullCount = window.__captured.length;
+    document.querySelector('#chatgpt-saver-btn').click();
+    const modernFull = await waitFor(() => window.__captured[fullCount]);
+    if (exportedRoles(modernFull) !== 'User,ChatGPT,User,User,ChatGPT,User,ChatGPT' || /Edit question|Copy answer|Activity outside|ChatGPT 说/.test(contentText(modernFull))) {
+      failures.push('full export should retain all modern messages in order without UI controls');
+    }
+
+    const downloadCard = filename => '<span class="group/resource-row relative"><button aria-label="打开 ' + filename + ' 的预览"></button><span title="' + filename + '">' + filename + '</span><span>打开文件</span><button aria-label="下载文件"></button></span>';
+    modernTurns[1].querySelector('[data-markdown-text-style]').insertAdjacentHTML('beforeend', downloadCard('report.docx') + downloadCard('report.docx') + downloadCard('large.pdf'));
+    modernTurns[4].querySelector('[data-markdown-text-style]').insertAdjacentHTML('beforeend', downloadCard('other-reply.txt') + downloadCard('report.docx'));
+    const disabledAttachments = await exportBubble(modernTurns[1], '单条导出');
+    if (window.__helperRequests.length || window.__downloadClicks.length || disabledAttachments.children.some(block => block.file?.type === 'file_upload')) {
+      failures.push('attachments must be off by default without downloading or contacting the local helper');
+    }
+    window.prompt = () => 'test-local-key';
+    const toggleAttachments = window.__gmMenus.get('📎 开关自动上传下载附件（默认关闭）');
+    toggleAttachments();
+    if (!window.__gmValues.auto_upload_downloads) failures.push('menu should explicitly enable attachment upload');
+    await exportBubble(modernTurns[0], '单条导出');
+    if (window.__helperRequests.length || window.__downloadClicks.length) failures.push('exporting only a question must not download its answer attachments');
+    const attachedPair = await exportBubble(modernTurns[0], '一问一答导出');
+    if (window.__downloadClicks.join(',') !== 'report.docx,large.pdf' || window.__helperEvents.join(',') !== 'health,download:report.docx,upload,download:large.pdf,upload') {
+      failures.push('pair export should check the helper, download only its unique attachments, then request upload automatically');
+    }
+    const uploadedFile = attachedPair.children.find(block => block.file?.type === 'file_upload');
+    const answerIndex = attachedPair.children.findIndex(block => block.heading_3?.rich_text[0]?.text.content === 'ChatGPT');
+    const fileIndex = attachedPair.children.indexOf(uploadedFile);
+    if (!uploadedFile || uploadedFile.file.name !== 'report.docx' || uploadedFile.file.file_upload.id !== 'test-upload-id' || fileIndex <= answerIndex || attachedPair.children.at(-1)?.type !== 'divider') {
+      failures.push('uploaded files should appear under the selected answer before its divider');
+    }
+    if (!contentText(attachedPair).includes('large.pdf：超过自动上传大小限制') || !contentText(attachedPair).includes('ANSWER_A')) {
+      failures.push('an oversize attachment should keep its reason while the reply still exports');
+    }
+    const fileRequests = window.__helperRequests.slice(-2);
+    const requestedFiles = fileRequests.flatMap(request => request.files);
+    if (requestedFiles.length !== 2 || requestedFiles.some(file => !file.downloaded_after || !file.require_new_download) || fileRequests.some(request => request.notion_token !== 'token')) {
+      failures.push('attachments should deduplicate within a reply and request fresh downloads with the existing Notion token');
+    }
+    if (JSON.stringify(attachedPair).includes('_cgptAttachment') || JSON.stringify(attachedPair).includes('_cgptDownloadControl')) {
+      failures.push('internal attachment markers must not reach the Notion API');
+    }
+    const fullAttachmentCount = window.__captured.length;
+    document.querySelector('#chatgpt-saver-btn').click();
+    const fullAttachmentPayload = await waitFor(() => window.__captured[fullAttachmentCount]);
+    if (window.__helperRequests.slice(-4).flatMap(request => request.files).map(file => file.filename).join(',') !== 'report.docx,large.pdf,other-reply.txt,report.docx') {
+      failures.push('full export should automatically download and upload attachments from each included answer');
+    }
+    if (fullAttachmentPayload.children.filter(block => block.file?.name === 'report.docx').length !== 2) failures.push('a shared attachment must remain under each included answer after download deduplication');
+    modernTurns[1].querySelector('[title="切换隐私"]').click();
+    const helperCount = window.__helperRequests.length;
+    const downloadCount = window.__downloadClicks.length;
+    await exportBubble(modernTurns[0], '一问一答导出');
+    if (window.__helperRequests.length !== helperCount || window.__downloadClicks.length !== downloadCount) failures.push('privacy-skipped replies must not download files or submit attachment requests');
+    modernTurns[1].querySelector('[title="切换隐私"]').click();
+    window.__helperOffline = true;
+    const offlinePayload = await exportBubble(modernTurns[1], '单条导出');
+    if (!contentText(offlinePayload).includes('本地附件服务未启动') || !contentText(offlinePayload).includes('ANSWER_A')) {
+      failures.push('an unavailable helper should leave attachment notices and still save the reply');
+    }
+    if (window.__downloadClicks.length !== downloadCount) failures.push('an unavailable helper should not start unused downloads');
+    window.__helperOffline = false;
+    toggleAttachments();
+    const afterDisable = window.__helperRequests.length;
+    await exportBubble(modernTurns[1], '单条导出');
+    if (window.__gmValues.auto_upload_downloads || window.__helperRequests.length !== afterDisable || window.__downloadClicks.length !== downloadCount) {
+      failures.push('disabling attachments should restore export without local helper requests');
+    }
+    result.attachments = { defaultOff: true, autoDownload: true, uploadedName: uploadedFile?.file.name, deduplicatedFiles: requestedFiles.length, offlineStillExports: contentText(offlinePayload).includes('ANSWER_A') };
+
+    // The traditional article wrapper still represents one message, not two.
+    document.body.innerHTML = '<article data-testid="conversation-turn-0"><div data-message-author-role="user"><p>LEGACY_QUESTION</p></div></article><article data-testid="conversation-turn-1"><div data-message-author-role="assistant"><p>LEGACY_ANSWER</p></div></article>';
+    await waitFor(() => document.querySelectorAll('.cgpt-tool-group').length === 2);
+    const legacyPair = await exportBubble(document.querySelector('article'), '一问一答导出');
+    if (exportedRoles(legacyPair) !== 'User,ChatGPT' || !contentText(legacyPair).includes('LEGACY_ANSWER')) {
+      failures.push('legacy article wrappers should still support pair export without nested duplicates');
+    }
+
+    const savedPage = ${JSON.stringify(savedPage)?.replace(/<\/script/gi, '<\\/script')};
+    if (savedPage) {
+      const parsedPage = new DOMParser().parseFromString(savedPage, 'text/html');
+      const conversation = parsedPage.querySelector('[data-thread-find-target="conversation"]');
+      if (!conversation) throw new Error('saved page has no conversation root');
+      conversation.querySelectorAll('script, style, link, iframe').forEach(node => node.remove());
+      conversation.querySelectorAll('img').forEach(node => { node.removeAttribute('src'); node.removeAttribute('srcset'); });
+      document.body.replaceChildren(conversation);
+      const expectedCount = conversation.querySelectorAll('[data-user-message-bubble], [data-chatgpt-selection-message-id]').length;
+      await waitFor(() => conversation.querySelectorAll('.cgpt-tool-group').length === expectedCount);
+      const turns = Array.from(conversation.querySelectorAll('.cgpt-turn'));
+      const userTurn = turns.find(turn => turn.getAttribute('data-role') === 'user' && turn.querySelector('[data-user-message-bubble]'));
+      const selectedIndex = turns.indexOf(userTurn);
+      const pairedAnswer = turns[selectedIndex + 1];
+      const savedQuestion = await exportBubble(userTurn, '单条导出');
+      const savedAnswer = await exportBubble(pairedAnswer, '单条导出');
+      const savedPair = await exportBubble(userTurn, '一问一答导出');
+      if (exportedRoles(savedQuestion) !== 'User' || exportedRoles(savedAnswer) !== 'ChatGPT' || exportedRoles(savedPair) !== 'User,ChatGPT') {
+        failures.push('saved page should export questions, answers, and pairs with the correct roles');
+      }
+      const bodyText = userTurn.querySelector('[data-user-message-bubble]').textContent.trim();
+      if (!contentText(savedQuestion).includes(bodyText) || !bodyText.startsWith(savedQuestion.properties.Name.title[0].text.content)) {
+        failures.push('saved-page question content and title should come from the selected bubble');
+      }
+      const sourceLabels = Array.from(pairedAnswer.querySelectorAll('[data-testid="chatgpt-library-file-citation"]')).map(node => node.textContent.trim()).filter(Boolean);
+      if (sourceLabels.some(label => contentText(savedAnswer).includes(label))) failures.push('actual-page uploaded file reference labels must stay out of the exported answer');
+      result.savedPage = { bubbles: expectedCount, roles: turns.map(turn => turn.getAttribute('data-role')), singleQuestionBlocks: savedQuestion.children.length, singleAnswerBlocks: savedAnswer.children.length, pairBlocks: savedPair.children.length };
+      toggleAttachments();
+      const lastAnswer = turns.filter(turn => turn.getAttribute('data-role') === 'assistant').at(-1);
+      const savedAttachment = await exportBubble(lastAnswer, '单条导出');
+      const actualFiles = savedAttachment.children.filter(block => block.file?.type === 'file_upload');
+      if (actualFiles.length !== 1 || !actualFiles[0].file.name.endsWith('.docx')) {
+        failures.push('saved-page native download card should yield its full Word filename');
+      }
+      result.savedPage.attachmentNames = actualFiles.map(block => block.file.name);
+      toggleAttachments();
+    }
+    result.modernExports = { roles, singleQuestion: exportedRoles(questionPayload), singleAnswer: exportedRoles(answerPayload), pair: exportedRoles(pairPayload), unanswered: exportedRoles(unansweredPayload), dynamicPair: exportedRoles(dynamicPair) };
 
     document.body.innerHTML = '<pre id="out">' + JSON.stringify({ ok: failures.length === 0, failures, result }, null, 2)
       .replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch])) + '</pre>';
@@ -603,7 +859,7 @@ const result = spawnSync(chrome, [
   '--disable-gpu',
   '--no-first-run',
   '--no-default-browser-check',
-  '--virtual-time-budget=20000',
+  '--virtual-time-budget=45000',
   '--dump-dom',
   `file://${htmlPath}`
 ], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 10 });

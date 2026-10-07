@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.30
+// @version      2.34
 // @license      MIT
-// @description  ChatGPT 导出到 Notion：智能图片归位 (支持 PicList/PicGo)+隐私开关+单个对话导出
+// @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）
 // @author       Wyih
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -24,12 +24,15 @@
 
     if (window.top !== window.self) return;
 
-    console.log('[ChatGPT→Notion v2.30] script loaded');
+    console.log('[ChatGPT→Notion v2.34] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
     const ASSET_PLACEHOLDER_PREFIX = "PICLIST_WAITING::";
     const MAX_TEXT_LENGTH = 2000;
+    const ATTACHMENT_HELPER_URL = 'http://127.0.0.1:36678';
+    const DOWNLOAD_FILE_SELECTOR = 'button[aria-label="下载文件"], button[aria-label="Download file"], a[download], a[href^="sandbox:"]';
+    const attachmentDownloadTimes = new Map();
 
     // 🌟 稳定性配置 (平衡速度与稳定性)
     const NOTION_BLOCK_BATCH_SIZE = 90;
@@ -56,6 +59,18 @@
         }
     }
     GM_registerMenuCommand('⚙️ 设置 Notion Token', promptConfig);
+    GM_registerMenuCommand('📎 开关自动上传下载附件（默认关闭）', () => {
+        if (GM_getValue('auto_upload_downloads', false)) {
+            GM_setValue('auto_upload_downloads', false);
+            alert('自动上传附件已关闭。');
+            return;
+        }
+        const key = prompt('先启动本地附件辅助程序，再粘贴它显示的连接密钥：', GM_getValue('attachment_helper_key', ''));
+        if (!key?.trim()) return;
+        GM_setValue('attachment_helper_key', key.trim());
+        GM_setValue('auto_upload_downloads', true);
+        alert('附件功能已开启。导出时会自动下载对应文件，等待完成后上传到 Notion；超限或下载失败的附件会保留说明。');
+    });
 
     // ------------------- 2. UI 样式 -------------------
     GM_addStyle(`
@@ -89,9 +104,19 @@
     // ------------------- 3. 气泡定位 -------------------
     function getTurnWrappers() {
         const uniqueNodes = new Set();
-        document.querySelectorAll('div[data-testid="conversation-turn"]').forEach(el => uniqueNodes.add(el));
+        document.querySelectorAll('[data-testid="conversation-turn"], [data-testid^="conversation-turn-"]').forEach(el => uniqueNodes.add(el));
         document.querySelectorAll('[data-message-author-role]').forEach(el => uniqueNodes.add(el));
         document.querySelectorAll('.agent-turn').forEach(el => uniqueNodes.add(el));
+        // 新版 data-turn-key 同时包住问题和回答；按消息单元分别定位。
+        document.querySelectorAll([
+            '[data-chatgpt-search-unit-key$=":user"]',
+            '[data-chatgpt-search-unit-key$=":assistant"]',
+            '[data-content-search-unit-key$=":user"]',
+            '[data-content-search-unit-key$=":assistant"]',
+            '[data-user-message-bubble]',
+            '[data-chatgpt-selection-message-id]',
+            '[data-markdown-text-style="assistant-message"]'
+        ].join(',')).forEach(el => uniqueNodes.add(el));
 
         let sorted = Array.from(uniqueNodes);
         sorted.sort((a, b) => {
@@ -110,8 +135,14 @@
     function getRoleFromWrapper(wrapper) {
         let role = wrapper.getAttribute('data-message-author-role');
         if (role) return role;
+        const unitKey = wrapper.getAttribute('data-chatgpt-search-unit-key')
+            || wrapper.getAttribute('data-content-search-unit-key') || '';
+        const unitRole = unitKey.match(/:(user|assistant)$/)?.[1];
+        if (unitRole) return unitRole;
+        if (wrapper.hasAttribute('data-user-message-bubble')) return 'user';
         const inner = wrapper.querySelector('[data-message-author-role]');
         if (inner) return inner.getAttribute('data-message-author-role');
+        if (wrapper.querySelector('[data-user-message-bubble]')) return 'user';
         if (wrapper.classList.contains('agent-turn')) return 'assistant';
         if (wrapper.querySelector('div[class*="user"]')) return 'user';
         return 'assistant';
@@ -158,6 +189,21 @@
 
             group.appendChild(privacyBtn);
             group.appendChild(singleBtn);
+
+            if (role === 'user') {
+                const pairBtn = document.createElement('div');
+                pairBtn.className = 'cgpt-icon-btn';
+                pairBtn.title = '一问一答导出';
+                pairBtn.setAttribute('data-export-icon', '🔗');
+                const pairIcon = document.createElement('span');
+                pairIcon.textContent = '🔗';
+                pairBtn.appendChild(pairIcon);
+                pairBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    handleSingleExport(turn, pairBtn, pairIcon, true);
+                };
+                group.appendChild(pairBtn);
+            }
 
             if (turn.firstChild) turn.insertBefore(group, turn.firstChild);
             else turn.appendChild(group);
@@ -213,6 +259,129 @@
 
     function sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function getDownloadFileInfo(control) {
+        let filename = '';
+        let container = control;
+        if (control.tagName === 'A') {
+            filename = control.getAttribute('download') || '';
+            if (!filename && /\.[a-z0-9]{1,10}$/i.test(normalizedText(control))) filename = normalizedText(control);
+            if (!filename) {
+                try { filename = decodeURIComponent(new URL(control.href).pathname.split('/').pop()); } catch (_) { }
+            }
+        } else {
+            container = control.closest('[class~="group/resource-row"], [class~="group/resource-card"]');
+            if (!container) return null;
+            filename = Array.from(container.querySelectorAll('[title]')).map(el => el.getAttribute('title'))
+                .find(value => /\.[a-z0-9]{1,10}$/i.test(value)) || '';
+            if (!filename) {
+                const preview = container.querySelector('button[aria-label]');
+                filename = preview?.getAttribute('aria-label')?.match(/^打开 (.+) 的预览$/)?.[1] || '';
+            }
+        }
+        filename = filename.trim();
+        if (!filename || /[/\\\u0000-\u001f]/.test(filename) || !/\.[a-z0-9]{1,10}$/i.test(filename)) return null;
+        return { filename, container };
+    }
+
+    function attachmentKey(turn, filename) {
+        return `${getTurnMessageId(turn)}\u0000${filename}`;
+    }
+
+    document.addEventListener('click', event => {
+        if (!GM_getValue('auto_upload_downloads', false)) return;
+        const control = event.target.closest?.(DOWNLOAD_FILE_SELECTOR);
+        if (!control) return;
+        const turn = getTurnWrappers().find(node => node.contains(control));
+        if (!turn || getRoleFromWrapper(turn) !== 'assistant') return;
+        const info = getDownloadFileInfo(control);
+        if (info) attachmentDownloadTimes.set(attachmentKey(turn, info.filename), Date.now() / 1000);
+    }, true);
+
+    function collectDownloadedAttachments(turn) {
+        if (!GM_getValue('auto_upload_downloads', false) || getRoleFromWrapper(turn) !== 'assistant') return [];
+        const files = new Map();
+        turn.querySelectorAll(DOWNLOAD_FILE_SELECTOR).forEach(control => {
+            const info = getDownloadFileInfo(control);
+            if (info) files.set(info.filename, {
+                file: {
+                    filename: info.filename,
+                    downloaded_after: attachmentDownloadTimes.get(attachmentKey(turn, info.filename)) || null
+                },
+                control
+            });
+        });
+        return Array.from(files.values());
+    }
+
+    function attachmentNotice(filename, reason) {
+        return { object: 'block', type: 'paragraph', paragraph: {
+            rich_text: [{ type: 'text', text: { content: `📎 ${filename}：${reason}`.slice(0, MAX_TEXT_LENGTH) }, annotations: { color: 'gray' } }]
+        } };
+    }
+
+    async function processDownloadedAttachments(blocks, token, statusCallback) {
+        const pending = blocks.filter(block => block._cgptAttachment);
+        if (!pending.length) return blocks;
+        const entries = pending;
+        const files = entries.map(block => block._cgptAttachment);
+        const key = GM_getValue('attachment_helper_key', '');
+        let results;
+        try {
+            if (!key) throw new Error('本地附件服务未配置连接密钥');
+            const requestHelper = (method, path, data) => new Promise((resolve, reject) => GM_xmlhttpRequest({
+                method, url: `${ATTACHMENT_HELPER_URL}${path}`, timeout: 120000,
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+                data: data ? JSON.stringify(data) : undefined,
+                onload: res => {
+                    try {
+                        const data = JSON.parse(res.responseText);
+                        if (res.status !== 200) throw new Error(data.error || `本地附件服务返回 ${res.status}`);
+                        resolve(data);
+                    } catch (e) { reject(e); }
+                },
+                onerror: () => reject(new Error('本地附件服务未启动或无法连接')),
+                ontimeout: () => reject(new Error('本地附件服务处理超时'))
+            }));
+            const health = await requestHelper('GET', '/health');
+            if (health.service !== 'chatgpt-notion-attachments') throw new Error('本地附件服务响应不正确');
+            if (health.version < 2) throw new Error('请更新附件辅助程序，以支持自动下载');
+            results = [];
+            for (const [index, entry] of entries.entries()) {
+                statusCallback(`📥 Downloading: ${index + 1}/${files.length}...`);
+                const control = entry._cgptDownloadControl;
+                if (!control?.isConnected || control.disabled) {
+                    results.push({ filename: entry._cgptAttachment.filename, status: 'error', reason: '下载入口不可用，请刷新对话后再导出' });
+                    continue;
+                }
+                entry._cgptAttachment.downloaded_after = Date.now() / 1000;
+                entry._cgptAttachment.require_new_download = true;
+                control.click();
+                statusCallback(`📎 File: ${index + 1}/${files.length}...`);
+                // Finish each download before starting the next so different
+                // answers generating the same filename keep their own versions.
+                try {
+                    const response = await requestHelper('POST', '/upload', { notion_token: token, files: [entry._cgptAttachment] });
+                    if (!Array.isArray(response.results) || response.results.length !== 1) throw new Error('本地附件服务返回的文件列表不完整');
+                    results.push(response.results[0]);
+                } catch (error) {
+                    results.push({ filename: entry._cgptAttachment.filename, status: 'error', reason: error.message });
+                }
+            }
+        } catch (e) {
+            results = files.map(file => ({ filename: file.filename, status: 'error', reason: e.message }));
+        }
+        const resolved = new Map(entries.map((entry, i) => [entry, results[i]]));
+        return blocks.map(block => {
+            if (!block._cgptAttachment) return block;
+            const file = block._cgptAttachment;
+            const result = resolved.get(block);
+            if (result?.filename === file.filename && result.status === 'uploaded' && result.file_upload_id) {
+                return { object: 'block', type: 'file', file: { type: 'file_upload', file_upload: { id: result.file_upload_id }, name: file.filename } };
+            }
+            return attachmentNotice(file.filename, result?.reason || '附件上传失败');
+        });
     }
 
     async function processAssets(blocks, statusCallback) {
@@ -779,6 +948,9 @@
     function getTurnMessageId(turn) {
         return turn?.getAttribute?.('data-message-id')
             || turn?.querySelector?.('[data-message-id]')?.getAttribute('data-message-id')
+            || turn?.getAttribute?.('data-chatgpt-selection-message-id')
+            || turn?.querySelector?.('[data-chatgpt-selection-message-id]')?.getAttribute('data-chatgpt-selection-message-id')
+            || turn?.getAttribute?.('data-chatgpt-search-message-ids')?.trim().split(/\s+/)[0]
             || '';
     }
 
@@ -1933,6 +2105,7 @@
 
     function isIgnorableChatGPTFileReference(el) {
         if (!el || el.nodeType !== 1) return false;
+        if (el.matches('[data-testid="chatgpt-library-file-citation"]')) return true;
         if (isChatGPTFileReferenceLabel(el)) return true;
 
         const label = el.querySelector?.('p.not-prose.truncate.flex-auto');
@@ -2012,7 +2185,7 @@
     }
 
     function removeChatGPTExportChrome(root) {
-        root.querySelectorAll('.cgpt-tool-group, [aria-label="Response actions"], button[aria-label="Sources"]').forEach(el => el.remove());
+        root.querySelectorAll('.cgpt-tool-group, .turn-action-controls, [data-conversation-role], [aria-label="Response actions"], button[aria-label="Sources"], [data-testid="chatgpt-library-file-citation"]').forEach(el => el.remove());
         root.querySelectorAll('[aria-label="Reasoning details"], [role="region"]').forEach(el => {
             const label = String(el.getAttribute('aria-label') || '');
             const text = normalizedText(el).slice(0, 300);
@@ -2250,7 +2423,18 @@
             const clone = turn.cloneNode(true);
             removeChatGPTExportChrome(clone);
 
+            const attachments = collectDownloadedAttachments(turn);
+            if (attachments.length) {
+                clone.querySelectorAll(DOWNLOAD_FILE_SELECTOR).forEach(control => {
+                    const info = getDownloadFileInfo(control);
+                    if (info) info.container.remove();
+                });
+            }
+
             children.push(...processNodesToBlocks(clone.childNodes, new Set()));
+            attachments.forEach(({ file, control }) => children.push({
+                ...attachmentNotice(file.filename, '等待下载和上传'), _cgptAttachment: file, _cgptDownloadControl: control
+            }));
             children.push({ object: "block", type: "divider", divider: {} });
         });
         return children;
@@ -2260,7 +2444,7 @@
         const all = getTurnWrappers();
         const el = specificTurn || (all.find(t => getRoleFromWrapper(t) === 'user') || all[0]);
         if (!el) return 'ChatGPT Chat';
-        const clone = el.cloneNode(true);
+        const clone = (el.querySelector('[data-user-message-bubble]') || el).cloneNode(true);
         removeChatGPTExportChrome(clone);
         removeChatGPTPureControlNodes(clone);
         return cleanChatTitleText(clone.innerText || clone.textContent) || 'ChatGPT Chat';
@@ -2344,7 +2528,7 @@
             if (btnOrLabel.classList && btnOrLabel.classList.contains('cgpt-icon-btn') && iconElem) {
                 if (msg && msg.includes('Saved')) {
                     btnOrLabel.classList.remove('processing'); btnOrLabel.classList.add('success'); iconElem.textContent = '✅';
-                    setTimeout(() => { btnOrLabel.classList.remove('success'); iconElem.textContent = '📤'; }, 2500);
+                    setTimeout(() => { btnOrLabel.classList.remove('success'); iconElem.textContent = btnOrLabel.getAttribute('data-export-icon') || '📤'; }, 2500);
                 } else if (msg && (msg.includes('Fail') || msg.includes('Error'))) {
                     btnOrLabel.classList.remove('processing'); btnOrLabel.classList.add('error'); iconElem.textContent = '❌';
                 } else if (msg) {
@@ -2360,6 +2544,7 @@
         } else updateStatus('Processing...');
 
         try {
+            blocks = await processDownloadedAttachments(blocks, token, updateStatus);
             blocks = await processAssets(blocks, updateStatus);
             if (btnOrLabel.id === 'chatgpt-saver-btn') btnOrLabel.textContent = '💾 Saving...';
             createPageAndUpload(title, blocks, token, dbId, updateStatus);
@@ -2384,7 +2569,7 @@
         executeExport(blocks, getChatTitle(), btn);
     }
 
-    async function handleSingleExport(turnWrapper, iconBtn, iconElem) {
+    async function handleSingleExport(turnWrapper, iconBtn, iconElem, includeReply = false) {
         const all = getTurnWrappers();
         const idx = all.indexOf(turnWrapper);
         if (idx === -1) return alert('未找到气泡');
@@ -2392,7 +2577,7 @@
         const targets = [turnWrapper];
         const role = getRoleFromWrapper(turnWrapper);
 
-        if (role === 'user') {
+        if (includeReply && role === 'user') {
             for (let i = idx + 1; i < all.length; i++) {
                 const r = getRoleFromWrapper(all[i]);
                 if (r === 'assistant') {
