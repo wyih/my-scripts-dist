@@ -2,11 +2,16 @@
 
 ChatGPT exporter 2.34 的附件自动上传**默认关闭**。只导出对话的用户直接使用油猴脚本即可。
 
-本机服务的完整代码是 [helper.py](helper.py)，Mac 启动入口是 [启动附件辅助程序.command](启动附件辅助程序.command)，Windows 启动入口是 [start-helper.cmd](start-helper.cmd)。两者均需要 Python 3.10 或以上，无需第三方 Python 依赖。
+本机服务的完整代码是 [helper.py](helper.py)。Mac 包附带 `启动附件辅助程序.command`，Windows 包附带 `start-helper.cmd`。两者均需要 Python 3.10 或以上，无需第三方 Python 依赖。
 
 ## 下载与部署
 
-先在油猴脚本中配置 Notion Token 和 Database ID，具体见 [主 README](https://github.com/wyih/my-scripts-dist/blob/main/README.md)。随后 [下载附件辅助程序 ZIP](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper.zip) 并解压，打开其中的 `notion-attachment-helper` 文件夹。下载包只包含 `helper.py`、Mac 与 Windows 启动文件及本说明。启动文件和 `helper.py` 须放在同一目录。
+先在油猴脚本中配置 Notion Token 和 Database ID，具体见 [主 README](https://github.com/wyih/my-scripts-dist/blob/main/README.md)。按系统下载对应的包并解压，打开其中的 `notion-attachment-helper` 文件夹。每个包只包含 `helper.py`、对应系统的启动文件和本说明三个文件。启动文件和 `helper.py` 须放在同一目录。
+
+| 系统 | 下载 | 启动文件 |
+| --- | --- | --- |
+| Mac | [Mac 版 ZIP](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper-mac.zip) | `启动附件辅助程序.command` |
+| Windows | [Windows 版 ZIP](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper-windows.zip) | `start-helper.cmd` |
 
 ### Mac
 

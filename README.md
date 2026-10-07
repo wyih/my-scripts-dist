@@ -44,7 +44,14 @@ Database ID 是数据库链接中、`?` 之前的 32 位 ID；视图参数 `?v=`
 
 开启后，直接导出对应回答即可，脚本自动下载文件并上传，无需逐次点击下载或选择文件。辅助程序本身是一个 Python 脚本，运行时提供本机服务；需要 **Python 3.10 或以上**，无需安装 Python 第三方依赖。
 
-辅助程序提供[独立下载包](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper.zip)。解压后打开 `notion-attachment-helper` 文件夹，包内只包含以下四个文件，请保留它们在同一目录：
+辅助程序按系统提供独立下载包。每个包只包含 `helper.py`、对应系统的启动文件和 `README.md` 三个文件。解压后打开 `notion-attachment-helper` 文件夹，请保留三个文件在同一目录。
+
+| 系统 | 下载 | 启动文件 |
+| --- | --- | --- |
+| Mac | [下载 Mac 版辅助程序](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper-mac.zip) | `启动附件辅助程序.command` |
+| Windows | [下载 Windows 版辅助程序](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper-windows.zip) | `start-helper.cmd` |
+
+源码和说明：
 
 | 文件 | 用途 |
 | --- | --- |
@@ -55,7 +62,7 @@ Database ID 是数据库链接中、`?` 之前的 32 位 ID；视图参数 `?v=`
 
 ### Mac
 
-1. 下载并解压 [附件辅助程序 ZIP](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper.zip)，打开其中的 `notion-attachment-helper` 文件夹。
+1. 下载并解压 [Mac 版辅助程序 ZIP](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper-mac.zip)，打开其中的 `notion-attachment-helper` 文件夹。
 2. 双击 `启动附件辅助程序.command`，保持终端窗口运行。若解压后文件不可执行，在该文件夹的终端运行 `chmod +x 启动附件辅助程序.command`，再双击。
 3. 复制终端显示的连接密钥，在 ChatGPT 页面的油猴菜单「📎 开关自动上传下载附件（默认关闭）」中粘贴，完成开启。
 4. 直接导出对应回答，脚本会自动下载文件并上传到 Notion。
@@ -64,7 +71,7 @@ Database ID 是数据库链接中、`?` 之前的 32 位 ID；视图参数 `?v=`
 
 ### Windows
 
-1. 下载并解压同一个 [附件辅助程序 ZIP](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper.zip)，打开 `notion-attachment-helper` 文件夹。
+1. 下载并解压 [Windows 版辅助程序 ZIP](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper-windows.zip)，打开 `notion-attachment-helper` 文件夹。
 2. 从 [Python 官方 Windows 下载页](https://www.python.org/downloads/windows/) 安装 Python 3.10 或以上，启用 Python Launcher，或把 Python 加入 PATH。
 3. 双击 `start-helper.cmd`，保持命令窗口运行。启动文件会优先使用 `py -3`，也可使用 PATH 中的 `python`。
 4. 复制显示的连接密钥，在 ChatGPT 页面的同一油猴附件菜单中粘贴，完成开启。
