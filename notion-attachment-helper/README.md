@@ -6,7 +6,7 @@ ChatGPT exporter 2.34 的附件自动上传**默认关闭**。只导出对话的
 
 ## 下载与部署
 
-先在油猴脚本中配置 Notion Token 和 Database ID，具体见 [主 README](https://github.com/wyih/my-scripts-dist/blob/main/README.md)。随后 [下载仓库 ZIP](https://github.com/wyih/my-scripts-dist/archive/refs/heads/main.zip) 并解压，打开其中的 `notion-attachment-helper` 文件夹。启动文件和 `helper.py` 须放在同一目录。
+先在油猴脚本中配置 Notion Token 和 Database ID，具体见 [主 README](https://github.com/wyih/my-scripts-dist/blob/main/README.md)。随后 [下载附件辅助程序 ZIP](https://raw.githubusercontent.com/wyih/my-scripts-dist/refs/heads/main/downloads/notion-attachment-helper.zip) 并解压，打开其中的 `notion-attachment-helper` 文件夹。下载包只包含 `helper.py`、Mac 与 Windows 启动文件及本说明。启动文件和 `helper.py` 须放在同一目录。
 
 ### Mac
 
