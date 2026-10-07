@@ -231,6 +231,16 @@ class AttachmentHelperTest(unittest.TestCase):
         self.assertEqual(data['results'][0]['size_bytes'], len(content))
         self.assertIn(content, NotionMock.requests[-1][2])
 
+    def test_chrome_number_breaks_equal_modification_time_ties(self):
+        timestamp = time.time() - 1
+        for name in ['report.pdf', 'report (2).pdf', 'report (10).pdf']:
+            path = self.downloads / name
+            path.write_bytes(name.encode())
+            os.utime(path, (timestamp, timestamp))
+        _, data = self.post([{'filename': 'report.pdf'}])
+        self.assertEqual(data['results'][0]['status'], 'uploaded')
+        self.assertIn(b'report (10).pdf', NotionMock.requests[-1][2])
+
     def test_replaced_file_is_rejected_before_reading(self):
         path = self.downloads / 'report.txt'
         path.write_bytes(b'expected download')

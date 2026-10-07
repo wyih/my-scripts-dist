@@ -70,7 +70,7 @@ class AttachmentHelper:
     def _find_download(self, download: Download) -> Path | None:
         normalized = unicodedata.normalize('NFC', download.filename)
         stem, extension = os.path.splitext(normalized)
-        pattern = re.compile(re.escape(stem) + r'(?: \(\d+\))?' + re.escape(extension) + r'$')
+        pattern = re.compile(re.escape(stem) + r'(?: \((\d+)\))?' + re.escape(extension) + r'$')
         deadline = time.monotonic() + self.wait_seconds
         while True:
             matches = []
@@ -81,15 +81,16 @@ class AttachmentHelper:
                     continue
                 if name.endswith('.crdownload') and pattern.fullmatch(name[:-11]):
                     partial = True
-                if pattern.fullmatch(name) and entry.is_file():
+                match = pattern.fullmatch(name)
+                if match and entry.is_file():
                     info = entry.stat()
                     threshold = download.downloaded_after
                     if threshold is not None and not download.require_new_download:
                         threshold -= 2
                     if threshold is None or info.st_mtime >= threshold:
-                        matches.append((info.st_mtime_ns, entry.name, entry))
+                        matches.append((info.st_mtime_ns, int(match[1] or 0), entry.name, entry))
             if matches and not partial:
-                return max(matches)[2]
+                return max(matches)[-1]
             if time.monotonic() >= deadline or (not partial and download.downloaded_after is None):
                 return None
             time.sleep(0.25)
