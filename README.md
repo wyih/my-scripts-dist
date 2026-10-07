@@ -44,6 +44,15 @@ Database ID 是数据库链接中、`?` 之前的 32 位 ID；视图参数 `?v=`
 
 开启后，直接导出对应回答即可，脚本自动下载文件并上传，无需逐次点击下载或选择文件。辅助程序本身是一个 Python 脚本，运行时提供本机服务；需要 **Python 3.10 或以上**，无需安装 Python 第三方依赖。
 
+辅助程序代码和启动文件随本仓库一起提供。[下载 ZIP](https://github.com/wyih/my-scripts-dist/archive/refs/heads/main.zip) 并解压后，打开 `notion-attachment-helper` 文件夹，保留以下文件在同一目录：
+
+| 文件 | 用途 |
+| --- | --- |
+| [helper.py](https://github.com/wyih/my-scripts-dist/blob/main/notion-attachment-helper/helper.py) | 本机服务的完整 Python 源码，负责读取下载文件并上传到 Notion |
+| [启动附件辅助程序.command](https://github.com/wyih/my-scripts-dist/blob/main/notion-attachment-helper/启动附件辅助程序.command) | Mac 双击启动入口 |
+| [start-helper.cmd](https://github.com/wyih/my-scripts-dist/blob/main/notion-attachment-helper/start-helper.cmd) | Windows 双击启动入口 |
+| [辅助程序 README](https://github.com/wyih/my-scripts-dist/blob/main/notion-attachment-helper/README.md) | 可单独阅读的部署、使用和接口说明 |
+
 ### Mac
 
 1. 下载并解压 [附件辅助程序所在的仓库 ZIP](https://github.com/wyih/my-scripts-dist/archive/refs/heads/main.zip)，打开其中的 `notion-attachment-helper` 文件夹。

@@ -2,7 +2,49 @@
 
 ChatGPT exporter 2.34 的附件自动上传**默认关闭**。只导出对话的用户直接使用油猴脚本即可。
 
-Mac 使用 `启动附件辅助程序.command`，Windows 使用 `start-helper.cmd`。两者均需要 Python 3.10 或以上，无需第三方 Python 依赖。完整安装、Notion 配置、上传限制和 Mac / Windows 使用步骤见 [主 README](https://github.com/wyih/my-scripts-dist/blob/main/README.md)。
+本机服务的完整代码是 [helper.py](helper.py)，Mac 启动入口是 [启动附件辅助程序.command](启动附件辅助程序.command)，Windows 启动入口是 [start-helper.cmd](start-helper.cmd)。两者均需要 Python 3.10 或以上，无需第三方 Python 依赖。
+
+## 下载与部署
+
+先在油猴脚本中配置 Notion Token 和 Database ID，具体见 [主 README](https://github.com/wyih/my-scripts-dist/blob/main/README.md)。随后 [下载仓库 ZIP](https://github.com/wyih/my-scripts-dist/archive/refs/heads/main.zip) 并解压，打开其中的 `notion-attachment-helper` 文件夹。启动文件和 `helper.py` 须放在同一目录。
+
+### Mac
+
+1. 安装 Python 3.10 或以上，可使用 [Python 官方安装包](https://www.python.org/downloads/macos/) 或已有的 Homebrew Python。
+2. 双击 `启动附件辅助程序.command`。若文件不可执行，在该文件夹的终端运行 `chmod +x 启动附件辅助程序.command`，再双击。
+3. 保持终端窗口运行，复制其中显示的连接密钥。
+4. 在 ChatGPT 页面的油猴菜单「📎 开关自动上传下载附件（默认关闭）」中粘贴密钥，开启功能。
+
+### Windows
+
+1. 安装 [Python 3.10 或以上](https://www.python.org/downloads/windows/)，启用 Python Launcher，或把 Python 加入 PATH。
+2. 双击 `start-helper.cmd`，它会优先使用 `py -3`，也可使用 PATH 中的 `python`。
+3. 保持命令窗口运行，复制显示的连接密钥。
+4. 在 ChatGPT 页面的同一油猴附件菜单中粘贴密钥，开启功能。
+
+开启后，直接导出对应回答，脚本自动下载生成文件，等待下载完成后上传到 Notion，并放在对应回答末尾。用户上传文件的引用卡片会从正文中省略，不会触发下载。
+
+### 下载目录、停止与更新
+
+默认读取 Mac 的 `~/Downloads`、Windows 的 `%USERPROFILE%\Downloads`。若 Chrome 使用其他下载位置，在辅助程序文件夹内运行：
+
+Mac：
+
+```sh
+./启动附件辅助程序.command --downloads-dir "/实际下载目录"
+```
+
+Windows 命令提示符：
+
+```bat
+start-helper.cmd --downloads-dir "D:\ChatGPT下载"
+```
+
+Chrome 的「下载前询问保存位置」须关闭，以便自动保存；批量导出若出现允许多个文件下载的提示，需要在浏览器中允许。
+
+关闭服务窗口或按 Ctrl+C 可停止。启动文件不会注册开机启动。更新时停止旧服务，下载新包后重新启动；连接密钥保存在用户目录，替换程序文件后仍可沿用。
+
+自动上传上限为 20 MiB 与 Notion 工作区单文件限制中的较小值；免费工作区通常为 5 MiB。超限、下载失败或上传失败时，正文仍会保存，附件位置保留文件名与原因。
 
 ## 直接运行
 
