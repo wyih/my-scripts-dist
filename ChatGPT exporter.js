@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.34
+// @version      2.35
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）
 // @author       Wyih
@@ -24,7 +24,7 @@
 
     if (window.top !== window.self) return;
 
-    console.log('[ChatGPT→Notion v2.34] script loaded');
+    console.log('[ChatGPT→Notion v2.35] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -42,9 +42,9 @@
     // ------------------- 0. PicList 环境自检 -------------------
     function checkPicListConnection() {
         GM_xmlhttpRequest({
-            method: "GET", url: "http://127.0.0.1:36677/heartbeat", timeout: 2000,
-            onload: (res) => { if (res.status === 200) console.log("✅ PicList 连接正常"); },
-            onerror: () => console.warn("⚠️ PicList 未连接")
+            method: "POST", url: "http://127.0.0.1:36677/heartbeat", timeout: 2000,
+            onload: (res) => { if (res.status === 200) console.log("✅ 图片上传服务连接正常"); },
+            onerror: () => console.warn("⚠️ 图片上传服务未连接")
         });
     }
     setTimeout(checkPicListConnection, 3000);
@@ -247,7 +247,7 @@
                 if (mimeMap[mime]) finalFilename += mimeMap[mime]; else finalFilename += '.png';
             }
             const boundary = "----ChatGPTBoundary" + Math.random().toString(36).substring(2);
-            const preData = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${finalFilename.replace(/"/g, '')}"\r\nContent-Type: ${mime || 'application/octet-stream'}\r\n\r\n`;
+            const preData = `--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="${finalFilename.replace(/"/g, '')}"\r\nContent-Type: ${mime || 'application/octet-stream'}\r\n\r\n`;
             const combinedBlob = new Blob([preData, arrayBufferObj.buffer, `\r\n--${boundary}--\r\n`]);
             GM_xmlhttpRequest({
                 method: "POST", url: PICLIST_URL, headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` }, data: combinedBlob,

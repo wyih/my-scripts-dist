@@ -1,6 +1,6 @@
 # 可选附件辅助程序
 
-ChatGPT exporter 2.34 的附件自动上传**默认关闭**。只导出对话的用户直接使用油猴脚本即可。
+ChatGPT exporter 2.34 及以上版本的附件自动上传**默认关闭**。只导出对话的用户直接使用油猴脚本即可。
 
 本机服务的完整代码是 [helper.py](helper.py)。Mac 包附带 `启动附件辅助程序.command`，Windows 包附带 `start-helper.cmd`。两者均需要 Python 3.10 或以上，无需第三方 Python 依赖。
 

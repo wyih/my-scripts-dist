@@ -1,15 +1,20 @@
 # ChatGPT to Notion Exporter
 
-将 ChatGPT 的整段对话、单个问题或回答、一问一答导出到 Notion 数据库。支持标题、列表、引用、表格、公式和代码块，图片继续通过 PicList/PicGo 处理。
+将 ChatGPT 的整段对话、单个问题或回答、一问一答导出到 Notion 数据库。支持标题、列表、引用、表格、公式和代码块；图片通过本机 PicList/PicGo 上传到你配置的图床，再将图片链接写入 Notion。
 
-**当前版本：2.34。Mac 和 Windows 均可使用普通对话导出；附件自动上传是可选功能，默认关闭。** 只导出对话的用户安装油猴脚本并配置 Notion 即可。
+**当前版本：2.35。Mac 和 Windows 均可使用普通对话导出；附件自动上传是可选功能，默认关闭。** 只导出文字的用户安装油猴脚本并配置 Notion 即可。需要图片时再配置图片服务，需要生成文件时再部署附件辅助程序。
 
-## 安装与 Notion 配置
+## 安装脚本
 
 1. 在 Chrome 或 Edge 中安装 [Tampermonkey](https://www.tampermonkey.net/)。
 2. 从 [Greasy Fork 安装或更新脚本](https://greasyfork.org/zh-CN/scripts/557605-chatgpt-to-notion-exporter)，然后刷新 ChatGPT 页面。
-3. 在 [Notion Integrations](https://www.notion.so/my-integrations) 创建集成，取得 Integration Secret，并通过目标数据库的「连接 / Connections」菜单把集成连接到数据库。
-4. 确认数据库有以下三个属性，名称和类型须一致：
+3. 页面右下角出现「📥 Save to Notion」，鼠标移到消息气泡上可看到单条导出按钮。
+
+## 首次配置 Notion
+
+### 1. 创建数据库
+
+在 Notion 新建一个数据库，例如命名为「ChatGPT 对话」。把数据库自带的标题列改名为 `Name`，再添加 `Date` 和 `URL` 两列，名称和类型须与下表一致：
 
 | 属性名称 | Notion 类型 | 用途 |
 | --- | --- | --- |
@@ -17,9 +22,39 @@
 | `Date` | 日期 / Date | 导出时间 |
 | `URL` | URL | 原始 ChatGPT 对话链接 |
 
-5. 在 ChatGPT 页面打开油猴菜单「⚙️ 设置 Notion Token」，填写 Integration Secret 和 Database ID。已有配置会沿用。
+### 2. 创建集成并取得 Token
 
-Database ID 是数据库链接中、`?` 之前的 32 位 ID；视图参数 `?v=` 后面的 ID 是另一项。
+打开 [Notion 集成管理](https://www.notion.so/my-integrations)，新建内部集成（Internal Integration / Internal Connection），选择该数据库所在的工作区，名称可填「ChatGPT 导出」。创建后在「配置 / Configuration」中复制 API Token，也称 `Internal Integration Secret`。新建内部连接的具体界面见 [Notion 官方说明](https://developers.notion.com/guides/get-started/internal-connections)。
+
+### 3. 将集成连接到数据库
+
+打开刚才的数据库，点击右上角 `•••` →「连接 / Connections」→「添加连接 / Add connection」，搜索并选择「ChatGPT 导出」。这一步让集成可以向该数据库写入内容。也可在集成管理的「Content access」中选择数据库；见 [Notion 页面授权说明](https://developers.notion.com/guides/get-started/internal-connections)。
+
+### 4. 取得 Database ID（示例）
+
+打开数据库本身并复制链接。如果数据库嵌在普通页面中，先将数据库打开为整页，再复制链接。例如下面这个**示意链接**：
+
+```text
+https://www.notion.so/1234567890abcdef1234567890abcdef?v=abcdef0123456789abcdef0123456789
+```
+
+应填写的 Database ID 是：
+
+```text
+1234567890abcdef1234567890abcdef
+```
+
+即 `?` 前面的 32 位字符。`?v=` 后面的 `abcdef0123456789abcdef0123456789` 是视图 ID，不填到脚本中；上面的示例 ID 也需要替换为你自己的数据库 ID。如果链接带有数据库名称，例如 `ChatGPT-Export-1234567890abcdef1234567890abcdef?v=...`，仍取名称后面的这 32 位字符。位置规则见 [Notion 官方数据库 ID 说明](https://developers.notion.com/reference/retrieve-a-database)。
+
+### 5. 在油猴菜单中保存配置
+
+1. 回到 ChatGPT 页面，点击浏览器工具栏上的 Tampermonkey 图标；若图标未显示，可在扩展菜单中找到它。
+2. 在本脚本下点击「⚙️ 设置 Notion Token」。
+3. 第一个弹窗填写上面取得的 **Integration Secret / API Token**，点确定。
+4. 第二个弹窗填写你自己的 **Database ID**，点确定。
+5. 看到「配置已保存」后即可导出。配置会保存在油猴中，后续无需每次输入。
+
+首次直接点击导出按钮时也会提示填写这两项；保存后再点击一次导出即可。
 
 ## 对话导出
 
@@ -36,7 +71,59 @@ Database ID 是数据库链接中、`?` 之前的 32 位 ID；视图参数 `?v=`
 
 ## 图片导出
 
-需要导出图片时，安装并配置 [PicList](https://github.com/Kuingsmile/PicList/releases) 及其图床，开启本机上传服务，端口使用 `36677`。脚本取得图片的 HTTPS 链接后写入 Notion。图片服务与下面的附件辅助程序分别运行。
+图床负责保存图片，PicList/PicGo 负责把图片上传到图床。导出时，脚本将对话中的图片交给本机图片服务，取得 HTTPS 图片直链后写入对应消息的 Notion 内容。
+
+### 1. 安装 PicList 或 PicGo
+
+安装其中一个即可：
+
+- [PicList 下载](https://github.com/Kuingsmile/PicList/releases)：使用 2.6.3 或以上，支持本脚本使用的文件表单上传接口。
+- [PicGo 下载](https://github.com/Molunerfinn/PicGo/releases)：使用桌面版 2.4.0 或以上。
+
+Mac 下载对应系统的 `.dmg` 安装包，Windows 下载 `.exe` 安装包，安装后打开软件。接口版本依据 [PicList 表单上传说明](https://www.piclist.cn/advanced) 与 [PicGo 表单上传说明](https://docs.picgo.app/gui/guide/advance)。
+
+### 2. 配置图床并试传一张图片
+
+1. 在软件的「图床设置」中选择你使用的图床，例如 GitHub、S3、阿里云 OSS 等。
+2. 按该图床要求填写上传凭据、存储位置、访问域名等信息，保存并选为默认图床。配置项目见 [PicList 图床配置](https://www.piclist.cn/configure) 或 [PicGo 图床配置](https://docs.picgo.app/gui/guide/config)。
+3. 在软件的上传区拖入一张测试图片。上传成功后，取得图片直链，例如 `https://你的图床域名/images/test.png`。
+4. 在未登录图床的浏览器窗口打开这条链接，确认能直接看到图片；Notion 需要能访问这个链接。
+
+图床的上传凭据填写在 PicList/PicGo 中，Notion Token 填写在油猴菜单中。
+
+### 3. 开启本机 Server 并连接脚本
+
+在 PicList 的设置中找到「设置 Server / PicGo-Server 设置」，或在 PicGo 的「PicGo 设置」中打开「设置 Server」。设置为：
+
+| 设置项 | 值 |
+| --- | --- |
+| 开启 Server | 开启 |
+| 监听地址 / Host | `127.0.0.1` |
+| 监听端口 / Port | `36677` |
+
+保存设置，保持软件运行。两款软件共用此端口，因此只运行你选用的那一款。当前脚本直接请求 `http://127.0.0.1:36677/upload`，没有图片服务鉴权密钥的配置入口；本机 Server 的接口鉴权密钥（若有）保持为空，监听地址使用上面的本机地址。图床本身的上传凭据仍按图床要求填写。
+
+设置位置见 [PicList Server 配置](https://www.piclist.cn/configure) 和 [PicGo Server 配置](https://docs.picgo.app/gui/guide/config)。
+
+### 4. 检查连接并导出
+
+1. 回到 ChatGPT 页面，打开浏览器开发者工具的「Console / 控制台」：Chrome 在 Mac 上按 `⌥⌘J`，Windows 上按 `Ctrl+Shift+J`。
+2. 刷新 ChatGPT，等待约 3 秒；连接成功会显示 `✅ 图片上传服务连接正常`。
+3. 导出一条含图片的回答。脚本会显示 `⏳ Images: ...`，完成后显示 `✅ Saved`，图片会出现在 Notion 的对应消息中。
+
+PicList 用户也可以在浏览器打开 `http://127.0.0.1:36677/heartbeat`，看到 `{"success":true,"result":"alive"}` 表示本机服务正在运行。此检查方法见 [PicList 健康检查接口](https://www.piclist.cn/advanced)。
+
+### 常见问题
+
+| 情况 | 检查方法 |
+| --- | --- |
+| 本机图片服务未连接 | 确认软件正在运行、Server 已开启、地址为 `127.0.0.1`、端口为 `36677`；若系统拦截连接，检查对应应用的网络权限 |
+| 连接正常，但图片上传失败 | 在 PicList/PicGo 中手动上传测试图片，检查图床凭据、默认图床及直链是否可访问 |
+| 只需要导出文字 | 可以跳过图片服务和下面的附件辅助程序；图片处理失败时会留下提示，文字仍会保存 |
+| Notion 提示无权访问或找不到数据库 | 检查 Token、Database ID，并确认已给集成连接该数据库 |
+| Notion 提示数据库属性错误 | 确认 `Name`、`Date`、`URL` 三列的名称和类型与前面的表格一致 |
+
+图片服务使用 `36677`；下面的附件辅助程序使用 `36678`，两项功能可分别配置。
 
 ## 可选：自动下载并上传生成的文件
 
@@ -109,4 +196,4 @@ start-helper.cmd --downloads-dir "D:\ChatGPT下载"
 
 ## 更新
 
-脚本发布在 Greasy Fork，源代码来自本仓库的 `ChatGPT exporter.js`，配置为 GitHub Webhook 同步。本说明也可作为 Greasy Fork 的附加信息同步源。附件辅助程序与油猴脚本分别更新；需要更新辅助程序时，停止旧服务，再下载新包重新启动。
+脚本发布在 Greasy Fork，源代码来自本仓库的 `ChatGPT exporter.js`，配置为 GitHub Webhook 同步。本 README 是 Greasy Fork 的附加说明同步源。附件辅助程序与油猴脚本分别更新；需要更新辅助程序时，停止旧服务，再下载对应系统的新包重新启动。

@@ -226,6 +226,8 @@ const sample = `<!doctype html>
 </template>
 <script>
 window.__captured = [];
+window.__imageUploads = [];
+window.__heartbeatRequests = [];
 window.__cgptTestConversationId = 'test-conversation';
 window.__openedUrls = [];
 window.__sourcesOpened = 0;
@@ -345,6 +347,9 @@ window.GM_addStyle = css => {
   document.head.appendChild(style);
 };
 window.fetch = async (url) => {
+  if (String(url) === 'https://example.com/upload-contract.png') {
+    return { ok: true, blob: async () => new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 255])], { type: 'image/png' }) };
+  }
   if (String(url).includes('/backend-api/conversation/')) {
     return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
   }
@@ -353,6 +358,18 @@ window.fetch = async (url) => {
 window.prompt = () => '';
 window.alert = (msg) => { window.__alert = msg; };
 window.GM_xmlhttpRequest = (req) => {
+  if (req.url === 'http://127.0.0.1:36677/upload') {
+    new Response(req.data, { headers: req.headers }).formData().then(async form => {
+      const file = form.get('files');
+      if (!(file instanceof File)) {
+        req.onload({ status: 400, responseText: JSON.stringify({ success: false, message: 'PicGo requires the files field' }) });
+        return;
+      }
+      window.__imageUploads.push({ type: file.type, bytes: Array.from(new Uint8Array(await file.arrayBuffer())) });
+      req.onload({ status: 200, responseText: JSON.stringify({ success: true, result: ['https://images.example.com/upload-contract.png'] }) });
+    }).catch(() => req.onerror({}));
+    return;
+  }
   if (req.url === 'http://127.0.0.1:36678/health') {
     window.__helperEvents.push('health');
     if (window.__helperOffline) { req.onerror({}); return; }
@@ -378,7 +395,8 @@ window.GM_xmlhttpRequest = (req) => {
     return;
   }
   if (req.url.includes('/heartbeat')) {
-    if (req.onerror) req.onerror({});
+    window.__heartbeatRequests.push(req.method);
+    req.onload({ status: req.method === 'POST' ? 200 : 404, responseText: JSON.stringify({ success: true, result: 'alive' }) });
     return;
   }
   if (req.method === 'PATCH' && req.url.includes('/children')) {
@@ -685,6 +703,21 @@ function collectHeadings(blocks) {
     if (answerPayload.children.some(block => block.type === 'image')) {
       failures.push('modern response action icons should not be uploaded as reply images');
     }
+    // Decode the multipart request against PicGo's actual field contract and
+    // verify its returned image link reaches the exported answer.
+    const testImage = document.createElement('img');
+    testImage.src = 'https://example.com/upload-contract.png';
+    modernTurns[1].querySelector('[data-markdown-text-style]').appendChild(testImage);
+    const imagePayload = await exportBubble(modernTurns[1], '单条导出');
+    const imageUpload = window.__imageUploads.at(-1);
+    if (!imagePayload.children.some(block => block.image?.external?.url === 'https://images.example.com/upload-contract.png') ||
+        imageUpload?.type !== 'image/png' || imageUpload?.bytes.join(',') !== '137,80,78,71,13,10,26,10,0,255') {
+      failures.push('PicGo multipart upload must use files, preserve binary image bytes, and export the returned link');
+    }
+    testImage.remove();
+    await waitFor(() => window.__heartbeatRequests.length);
+    if (window.__heartbeatRequests.some(method => method !== 'POST')) failures.push('image service heartbeat must use POST for PicGo compatibility');
+    result.imageUpload = { multipart: 'files', binaryPreserved: Boolean(imageUpload), heartbeat: window.__heartbeatRequests[0] };
     const pairPayload = await exportBubble(modernTurns[0], '一问一答导出');
     if (exportedRoles(pairPayload) !== 'User,ChatGPT' || !contentText(pairPayload).includes('ANSWER_A') || /QUESTION_B|ANSWER_B|Activity outside/.test(contentText(pairPayload))) {
       failures.push('pair export should contain exactly the selected question and its answer');
