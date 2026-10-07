@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.35
+// @version      2.36
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）
 // @author       Wyih
@@ -24,7 +24,7 @@
 
     if (window.top !== window.self) return;
 
-    console.log('[ChatGPT→Notion v2.35] script loaded');
+    console.log('[ChatGPT→Notion v2.36] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -117,6 +117,10 @@
             '[data-chatgpt-selection-message-id]',
             '[data-markdown-text-style="assistant-message"]'
         ].join(',')).forEach(el => uniqueNodes.add(el));
+        // 纯生成图片回答没有 assistant 消息单元标记，按图片所属消息定位。
+        document.querySelectorAll('[data-testid="generated-image-gallery"]').forEach(gallery => {
+            uniqueNodes.add(gallery.closest('[data-chatgpt-search-message-ids]') || gallery);
+        });
 
         let sorted = Array.from(uniqueNodes);
         sorted.sort((a, b) => {
@@ -2161,6 +2165,7 @@
 
     function shouldSkipChatGPTPureControlNode(node) {
         const el = node?.nodeType === 1 ? node : node?.parentElement;
+        if (node?.nodeType === 1 && node.querySelector('img, picture, canvas')) return false;
         if (el?.closest?.('a[href]')) return false;
         if (el?.querySelector?.('a[href]')) return false;
         if (el && hasNearbyChatGPTSourceChip(el)) return false;
@@ -2186,6 +2191,9 @@
 
     function removeChatGPTExportChrome(root) {
         root.querySelectorAll('.cgpt-tool-group, .turn-action-controls, [data-conversation-role], [aria-label="Response actions"], button[aria-label="Sources"], [data-testid="chatgpt-library-file-citation"]').forEach(el => el.remove());
+        root.querySelectorAll('[data-testid="generated-image-gallery"] button').forEach(button => {
+            if (!button.querySelector('img, picture, canvas')) button.remove();
+        });
         root.querySelectorAll('[aria-label="Reasoning details"], [role="region"]').forEach(el => {
             const label = String(el.getAttribute('aria-label') || '');
             const text = normalizedText(el).slice(0, 300);

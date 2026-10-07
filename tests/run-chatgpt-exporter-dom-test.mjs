@@ -346,7 +346,9 @@ window.GM_addStyle = css => {
   style.textContent = css;
   document.head.appendChild(style);
 };
+const nativeFetch = window.fetch.bind(window);
 window.fetch = async (url) => {
+  if (String(url).startsWith('blob:')) return nativeFetch(url);
   if (String(url) === 'https://example.com/upload-contract.png') {
     return { ok: true, blob: async () => new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 255])], { type: 'image/png' }) };
   }
@@ -707,14 +709,18 @@ function collectHeadings(blocks) {
     // verify its returned image link reaches the exported answer.
     const testImage = document.createElement('img');
     testImage.src = 'https://example.com/upload-contract.png';
-    modernTurns[1].querySelector('[data-markdown-text-style]').appendChild(testImage);
+    const imageCard = document.createElement('div');
+    imageCard.className = 'image-card';
+    imageCard.innerHTML = '<button aria-label="Edit image">Edit</button>';
+    imageCard.prepend(testImage);
+    modernTurns[1].querySelector('[data-markdown-text-style]').appendChild(imageCard);
     const imagePayload = await exportBubble(modernTurns[1], '单条导出');
     const imageUpload = window.__imageUploads.at(-1);
     if (!imagePayload.children.some(block => block.image?.external?.url === 'https://images.example.com/upload-contract.png') ||
         imageUpload?.type !== 'image/png' || imageUpload?.bytes.join(',') !== '137,80,78,71,13,10,26,10,0,255') {
       failures.push('PicGo multipart upload must use files, preserve binary image bytes, and export the returned link');
     }
-    testImage.remove();
+    imageCard.remove();
     await waitFor(() => window.__heartbeatRequests.length);
     if (window.__heartbeatRequests.some(method => method !== 'POST')) failures.push('image service heartbeat must use POST for PicGo compatibility');
     result.imageUpload = { multipart: 'files', binaryPreserved: Boolean(imageUpload), heartbeat: window.__heartbeatRequests[0] };
@@ -811,6 +817,35 @@ function collectHeadings(blocks) {
       failures.push('disabling attachments should restore export without local helper requests');
     }
     result.attachments = { defaultOff: true, autoDownload: true, uploadedName: uploadedFile?.file.name, deduplicatedFiles: requestedFiles.length, offlineStillExports: contentText(offlinePayload).includes('ANSWER_A') };
+
+    // Pure generated-image reply observed on 2026-10-07: it has a message ID
+    // and a gallery, but none of the assistant text/search-unit markers.
+    document.body.innerHTML = '<div data-turn-key="image-question"><div data-content-search-turn-key="fallback-turn-0">' + ${JSON.stringify(modernUser(0, 'IMAGE_QUESTION'))} +
+      '<span data-chatgpt-agent-turn-start></span><div class="block-BQZwFn"><div data-chatgpt-search-message-ids="image-answer"><div data-testid="generated-image-gallery"><div class="group/generated-image-preview"><button data-testid="generated-image-preview" aria-label="已生成图像 1"><img alt="已生成图像 1"></button><button aria-label="编辑生成的图像 1">编辑</button><button aria-label="Edit generated image 1">Edit</button><button aria-label="分享生成的图像 1">Share</button></div></div></div></div></div></div>';
+    const generatedBytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+    const generatedUrl = URL.createObjectURL(new Blob([generatedBytes], { type: 'image/png' }));
+    document.querySelector('[data-testid="generated-image-preview"] img').src = generatedUrl;
+    await waitFor(() => document.querySelectorAll('.cgpt-tool-group').length === 2);
+    const imageTurns = Array.from(document.querySelectorAll('.cgpt-turn'));
+    if (imageTurns.map(turn => turn.getAttribute('data-role')).join(',') !== 'user,assistant' || document.querySelector('[data-turn-key].cgpt-turn')) {
+      failures.push('a pure generated-image answer must be a separate assistant bubble');
+    }
+    const hasGeneratedImage = payload => payload.children.filter(block => block.image?.external?.url === 'https://images.example.com/upload-contract.png').length === 1;
+    const generatedSingle = await exportBubble(imageTurns[1], '单条导出');
+    const generatedPair = await exportBubble(imageTurns[0], '一问一答导出');
+    const generatedFullCount = window.__captured.length;
+    document.querySelector('#chatgpt-saver-btn').click();
+    const generatedFull = await waitFor(() => window.__captured[generatedFullCount]);
+    if (exportedRoles(generatedSingle) !== 'ChatGPT' || exportedRoles(generatedPair) !== 'User,ChatGPT' || exportedRoles(generatedFull) !== 'User,ChatGPT' ||
+        ![generatedSingle, generatedPair, generatedFull].every(hasGeneratedImage) || [generatedSingle, generatedPair, generatedFull].some(payload => /编辑|Edit|Share/.test(contentText(payload)))) {
+      failures.push('single, pair and full exports must include the pure generated image once, without gallery controls');
+    }
+    if (window.__imageUploads.at(-1)?.bytes.join(',') !== generatedBytes.join(',')) failures.push('generated blob image bytes must survive native fetch and PicList upload');
+    imageTurns[1].querySelector('[title="切换隐私"]').click();
+    const privateImagePair = await exportBubble(imageTurns[0], '一问一答导出');
+    if (exportedRoles(privateImagePair) !== 'User' || privateImagePair.children.some(block => block.type === 'image')) failures.push('private generated images must stay out of pair exports');
+    URL.revokeObjectURL(generatedUrl);
+    result.generatedImages = { single: hasGeneratedImage(generatedSingle), pair: hasGeneratedImage(generatedPair), full: hasGeneratedImage(generatedFull), blobBytesPreserved: true, privacy: true };
 
     // The traditional article wrapper still represents one message, not two.
     document.body.innerHTML = '<article data-testid="conversation-turn-0"><div data-message-author-role="user"><p>LEGACY_QUESTION</p></div></article><article data-testid="conversation-turn-1"><div data-message-author-role="assistant"><p>LEGACY_ANSWER</p></div></article>';
