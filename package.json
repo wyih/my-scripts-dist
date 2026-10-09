@@ -1,0 +1,11 @@
+{
+  "name": "my-scripts-dist-checks",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/run-chatgpt-exporter-dom-test.mjs && node tests/intelligent-ui.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}

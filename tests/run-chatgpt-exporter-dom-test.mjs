@@ -1,9 +1,9 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { JSDOM, VirtualConsole } from 'jsdom';
 
-const script = readFileSync(new URL('../ChatGPT exporter.js', import.meta.url), 'utf8');
+const script = readFileSync(process.env.CHATGPT_EXPORTER_SCRIPT || new URL('../ChatGPT exporter.js', import.meta.url), 'utf8');
 // An optional saved page exercises the same assertions against real page markup.
 const savedPage = process.argv[2] ? readFileSync(process.argv[2], 'utf8') : null;
 const modernUser = (index, text) => `
@@ -408,7 +408,7 @@ window.GM_xmlhttpRequest = (req) => {
   }
   if (req.onerror) req.onerror({});
 };
-${script}
+${script.replace(/<\/script/gi, '<\\/script')}
 
 function waitFor(fn, timeout = 15000) {
   const start = performance.now();
@@ -907,47 +907,31 @@ function collectHeadings(blocks) {
 const htmlPath = join(tmpdir(), 'chatgpt-exporter-dom-test.html');
 writeFileSync(htmlPath, sample);
 
-const chromeCandidates = [
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
-  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
-];
-const chrome = chromeCandidates.find(path => {
-  const result = spawnSync('/bin/test', ['-x', path]);
-  return result.status === 0;
+// DOM unit tests: deterministic layout stubs; no browser or user profile is launched.
+const errors = [];
+const virtualConsole = new VirtualConsole();
+virtualConsole.on('jsdomError', error => errors.push(error.message));
+const dom = new JSDOM(sample, {
+  url: 'https://chatgpt.com/c/test-conversation', runScripts: 'dangerously',
+  pretendToBeVisual: true, virtualConsole,
+  beforeParse(window) {
+    for (const key of ['fetch', 'Response', 'Request', 'Blob', 'File', 'TextEncoder', 'TextDecoder', 'CompressionStream', 'DecompressionStream']) window[key] = globalThis[key];
+    window.URL.createObjectURL = URL.createObjectURL;
+    window.URL.revokeObjectURL = URL.revokeObjectURL;
+    window.PointerEvent = window.MouseEvent;
+    window.HTMLElement.prototype.scrollIntoView = function () {};
+    window.Element.prototype.getBoundingClientRect = function () {
+      const hidden = window.getComputedStyle(this).display === 'none';
+      return {x: 0, y: 0, left: 0, top: 0, right: hidden ? 0 : 100, bottom: hidden ? 0 : 20, width: hidden ? 0 : 100, height: hidden ? 0 : 20};
+    };
+    Object.defineProperty(window.HTMLElement.prototype, 'innerText', { get() { return this.textContent; }, set(value) { this.textContent = value; } });
+  }
 });
-
-if (!chrome) {
-  console.error('No supported Chromium browser found.');
-  process.exit(1);
-}
-
-const result = spawnSync(chrome, [
-  '--headless=new',
-  '--disable-gpu',
-  '--no-first-run',
-  '--no-default-browser-check',
-  '--virtual-time-budget=45000',
-  '--dump-dom',
-  `file://${htmlPath}`
-], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 10 });
-
-if (result.error) throw result.error;
-if (result.stderr.trim()) process.stderr.write(result.stderr);
-
-const matches = Array.from(result.stdout.matchAll(/<pre id="out">([\s\S]*?)<\/pre>/g));
-const match = matches[matches.length - 1];
-if (!match) {
-  console.error(result.stdout.slice(-2000));
-  process.exit(1);
-}
-
-const output = match[1]
-  .replace(/&quot;/g, '"')
-  .replace(/&lt;/g, '<')
-  .replace(/&gt;/g, '>')
-  .replace(/&amp;/g, '&');
-
-console.log(output);
+const deadline = Date.now() + 90000;
+while (!dom.window.document.getElementById('out') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+const output = dom.window.document.getElementById('out')?.textContent;
+dom.window.close();
+if (!output) throw new Error('DOM tests timed out: ' + errors.join('; '));
 const parsed = JSON.parse(output);
-process.exit(parsed.ok ? 0 : 1);
+console.log(JSON.stringify({ok: parsed.ok, failures: parsed.failures, checks: Object.keys(parsed.result || {})}, null, 2));
+process.exitCode = parsed.ok ? 0 : 1;
