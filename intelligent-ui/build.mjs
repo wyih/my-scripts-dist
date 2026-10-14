@@ -39,4 +39,4 @@ const userscript=fs.readFileSync(userscriptPath,'utf8');
 const start=userscript.indexOf('    // BEGIN INTELLIGENT UI');
 const end=userscript.indexOf('    // END INTELLIGENT UI',start);
 if(start<0||end<0)throw new Error('Userscript integration markers missing');
-fs.writeFileSync(userscriptPath,userscript.slice(0,start)+'    // BEGIN INTELLIGENT UI (generated from intelligent-ui/exporter.js)\n'+read('content-sections.js')+'\n'+read('exporter.js')+userscript.slice(end));
+fs.writeFileSync(userscriptPath,userscript.slice(0,start)+'    // BEGIN INTELLIGENT UI (generated from intelligent-ui/*.js)\n'+read('content-sections.js')+'\n'+read('notion-height.js')+'\n'+read('exporter.js')+userscript.slice(end));

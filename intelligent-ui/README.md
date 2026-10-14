@@ -6,6 +6,10 @@ The renderer carries the form-submit callback fix verified in the Notion HTML sa
 
 ## Build and check
 
+`notion-height.js` is bundled into the userscript, and only its content reporter is appended to exported HTML. On Notion, the userscript returns before initializing ChatGPT controls or reading integration credentials. The reporter measures the content rectangle rather than viewport-inflated `scrollHeight`; the page companion saves the height through `.notion-block-resizer > div` mouse handlers. The drag starts from the whole preview height, which includes the filename bar; measure that wrapper when calculating the delta. A new UI export opens a background Notion tab after the final block append succeeds, visits lazy previews, then restores scroll positions. HTML page embeds were verified above 930 px; do not apply the generic resizer's default cap to them. Desktop Notion uses saved heights; live resizing of interactive state runs in the browser.
+
+The expected UI count is handed off through a page-specific userscript storage record, cleared after calibration. Notion removes query and hash markers during canonical navigation. Rescan for UI blocks mounted later, and use timers for measurement and saving: background tabs can suspend animation frames.
+
 ```sh
 npm ci --prefix intelligent-ui
 npm run build --prefix intelligent-ui

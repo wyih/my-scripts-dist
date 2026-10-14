@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.40
+// @version      2.41
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）+Intelligent UI 自动识别导出
 // @author       Wyih
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
+// @match        https://app.notion.com/*
+// @match        https://www.notion.so/*
 // @connect      api.notion.com
 // @connect      127.0.0.1
 // @connect      *
@@ -15,6 +17,7 @@
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
+// @grant        GM_openInTab
 // @grant        unsafeWindow
 // @run-at       document-end
 // ==/UserScript==
@@ -24,7 +27,16 @@
 
     if (window.top !== window.self) return;
 
-    console.log('[ChatGPT→Notion v2.40] script loaded');
+    if (['app.notion.com', 'www.notion.so'].includes(location.hostname)) {
+        // Notion removes query/hash markers when opening the canonical page URL.
+        const pageId = location.pathname.replace(/-/g, '').match(/[a-f0-9]{32}(?:\/|$)/i)?.[0].replace(/\/$/, '');
+        const pendingKey = 'cgpt_ui_height_' + pageId;
+        installNotionIntelligentUIHeight(pageId ? GM_getValue(pendingKey, 0) : 0,
+            () => GM_setValue(pendingKey, 0));
+        return;
+    }
+
+    console.log('[ChatGPT→Notion v2.41] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -2407,7 +2419,7 @@
         return blocks;
     }
 
-    // BEGIN INTELLIGENT UI (generated from intelligent-ui/exporter.js)
+    // BEGIN INTELLIGENT UI (generated from intelligent-ui/*.js)
 // Used on both the source DOM and the portable DOM so section ordering agrees.
 function intelligentUIContentSections(root) {
     const controls = 'form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"]';
@@ -2435,6 +2447,159 @@ function intelligentUIContentSections(root) {
         else sections.push({ native, nodes: [node], ...(!native ? { uiIndex: uiIndex++ } : {}) });
     }
     return sections;
+}
+
+// HTML reports its rendered content size; the Notion page saves it through its native resizer.
+function reportIntelligentUIHeight() {
+    const app = document.getElementById('app');
+    const main = app?.closest('main');
+    if (!app || !main || window.parent === window) return;
+    let pending, lastHeight = 0;
+    function report() {
+        pending = undefined;
+        if (!app.children.length) return;
+        const height = Math.ceil(main.getBoundingClientRect().bottom + window.scrollY
+            + (parseFloat(getComputedStyle(document.body).paddingBottom) || 0));
+        if (height <= 0 || height === lastHeight) return;
+        lastHeight = height;
+        window.parent.postMessage({type: 'cgpt-notion-ui:height', height}, '*');
+    }
+    function schedule() {
+        // Background tabs suspend animation frames, including those in HTML previews.
+        if (pending === undefined) pending = setTimeout(report, 50);
+    }
+    new ResizeObserver(schedule).observe(main);
+    new MutationObserver(schedule).observe(main, {
+        subtree: true, childList: true, characterData: true, attributes: true,
+    });
+    window.addEventListener('resize', schedule);
+    window.addEventListener('message', event => {
+        if (event.source === window.parent && event.data?.type === 'cgpt-notion-ui:measure') {
+            lastHeight = 0;
+            schedule();
+        }
+    });
+    document.fonts?.ready.then(schedule);
+    schedule();
+}
+
+async function resizeNotionIntelligentUIFrame(frame, height) {
+    const block = frame.closest('.notion-selectable[data-block-id]');
+    if (!block || !/intelligent-ui-[^\s]+\.html/i.test(block.textContent)) return false;
+    const handle = [...block.querySelectorAll('.notion-block-resizer > div')]
+        .find(node => getComputedStyle(node).cursor === 'row-resize');
+    if (!handle || document.body.classList.contains('is-dragging')) return false;
+    const current = frame.getBoundingClientRect().height;
+    if (Math.abs(current - height) <= 2) return true;
+    // The native resizer starts at the whole preview height, including its filename bar.
+    const resizeHeight = handle.parentElement.parentElement.getBoundingClientRect().height;
+    const diff = height - resizeHeight;
+    const bounds = handle.getBoundingClientRect();
+    const x = bounds.left + bounds.width / 2;
+    const y = bounds.top + bounds.height / 2;
+    const dispatch = (target, type, point, buttons) => target.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, cancelable: true, view: window, button: 0, buttons,
+        clientX: x, clientY: point,
+    }));
+    dispatch(handle, 'mousedown', y, 1);
+    try {
+        dispatch(window, 'mousemove', y + diff, 1);
+        // Notion throttles drag moves at 15 ms; finish after its state update.
+        await new Promise(resolve => setTimeout(resolve, 32));
+    } finally {
+        dispatch(window, 'mouseup', y + diff, 0);
+    }
+    await new Promise(resolve => setTimeout(resolve, 32));
+    return Math.abs(frame.getBoundingClientRect().height - height) <= 2;
+}
+
+function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => {}) {
+    const queued = new Map();
+    const fitted = new Set(), waiters = new Map();
+    let timer, running = false;
+    async function flush() {
+        timer = undefined;
+        if (running || document.body.classList.contains('is-dragging')) return;
+        running = true;
+        try {
+            for (const [frame, height] of queued) {
+                queued.delete(frame);
+                if (!frame.isConnected) continue;
+                if (await resizeNotionIntelligentUIFrame(frame, height)) {
+                    const block = frame.closest('[data-block-id]');
+                    fitted.add(block.getAttribute('data-block-id'));
+                    waiters.get(block)?.();
+                } else {
+                    console.warn('[ChatGPT→Notion] HTML 外框高度未保存', height);
+                }
+            }
+        } finally {
+            running = false;
+            if (queued.size) schedule();
+        }
+    }
+    function schedule() {
+        clearTimeout(timer);
+        timer = setTimeout(flush, 200);
+    }
+    window.addEventListener('message', event => {
+        const data = event.data;
+        if (data?.type !== 'cgpt-notion-ui:height' || typeof data.height !== 'number'
+            || !Number.isFinite(data.height) || data.height <= 0 || data.height > 10000) return;
+        const frame = [...document.querySelectorAll('.notion-selectable[data-block-id] iframe')]
+            .find(node => node.contentWindow === event.source);
+        if (!frame) return;
+        queued.set(frame, Math.max(96, Math.ceil(data.height)));
+        schedule();
+    });
+    window.addEventListener('mouseup', () => { if (queued.size) schedule(); });
+    // Request another measurement after a Notion re-render or a lazy iframe load.
+    document.addEventListener('load', event => {
+        if (event.target instanceof HTMLIFrameElement) {
+            event.target.contentWindow?.postMessage({type: 'cgpt-notion-ui:measure'}, '*');
+        }
+    }, true);
+    document.querySelectorAll('.notion-embed-block iframe').forEach(frame => {
+        frame.contentWindow?.postMessage({type: 'cgpt-notion-ui:measure'}, '*');
+    });
+
+    // A new export opens a background tab. Visit every UI block to load lazy previews,
+    // then restore the page's scroll position after saving all measured heights.
+    if (expectedCount > 0) {
+        const started = Date.now();
+        const visited = new Set(), scrollPositions = [];
+        async function fitExport() {
+            const blocks = [...document.querySelectorAll('.notion-embed-block')]
+                .filter(block => /intelligent-ui-[^\s]+\.html/i.test(block.textContent));
+            if (!scrollPositions.length && blocks.length) {
+                for (let node = blocks[0].parentElement; node; node = node.parentElement) {
+                    if (node.scrollHeight > node.clientHeight) scrollPositions.push([node, node.scrollTop]);
+                }
+            }
+            for (const block of blocks) {
+                const id = block.getAttribute('data-block-id');
+                if (!block.isConnected || fitted.has(id) || visited.has(id)) continue;
+                visited.add(id);
+                await new Promise(resolve => {
+                    const finish = () => { clearTimeout(timeout); waiters.delete(block); resolve(); };
+                    const timeout = setTimeout(finish, 12000);
+                    waiters.set(block, finish);
+                    block.scrollIntoView({block: 'center'});
+                    block.querySelector('iframe')?.contentWindow?.postMessage({type: 'cgpt-notion-ui:measure'}, '*');
+                });
+            }
+            if (fitted.size >= expectedCount) {
+                onComplete();
+            } else if (Date.now() - started < 60000) {
+                setTimeout(fitExport, 250);
+                return;
+            } else {
+                console.warn('[ChatGPT→Notion] HTML 外框校准未完成', fitted.size, expectedCount);
+            }
+            scrollPositions.forEach(([node, top]) => { if (node.isConnected) node.scrollTop = top; });
+        }
+        fitExport();
+    }
 }
 
     // The DIL renderer also renders ordinary prose. Require a widget or content control.
@@ -2631,7 +2796,8 @@ function intelligentUIContentSections(root) {
         const data = { ...bundle, code: '/* Program embedded at export time. */' };
         const compressed = await new Response(new Blob([JSON.stringify(data)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
         return template.replace('/*__CGPT_UI_PROGRAM__*/', () => program.replace(/<\/script/gi, '<\\/script'))
-            .replace('__CGPT_UI_DATA__', () => intelligentUIBase64(new Uint8Array(compressed)));
+            .replace('__CGPT_UI_DATA__', () => intelligentUIBase64(new Uint8Array(compressed)))
+            .replace('</html>', () => `<script>(${reportIntelligentUIHeight.toString()})();</script></html>`);
     }
 
     async function uploadIntelligentUIHTML(html, messageId, token) {
@@ -2750,10 +2916,11 @@ function intelligentUIContentSections(root) {
         return cleanChatTitleText(clone.innerText || clone.textContent) || 'ChatGPT Chat';
     }
 
-    function appendBlocksBatch(pageId, blocks, token, statusCallback, totalBlocks, sentBlocks) {
+    function appendBlocksBatch(pageId, blocks, token, statusCallback, totalBlocks, sentBlocks, onComplete) {
         if (!blocks.length) {
             statusCallback('✅ Saved!');
             setTimeout(() => statusCallback(null), 3000);
+            onComplete?.();
             return;
         }
 
@@ -2771,7 +2938,7 @@ function intelligentUIContentSections(root) {
             onload: (res) => {
                 if (res.status === 200) {
                     setTimeout(() => {
-                        appendBlocksBatch(pageId, remaining, token, statusCallback, totalBlocks, sentBlocks + batch.length);
+                        appendBlocksBatch(pageId, remaining, token, statusCallback, totalBlocks, sentBlocks + batch.length, onComplete);
                     }, NOTION_RATE_LIMIT_DELAY);
                 } else {
                     console.error("Notion API Error:", res.responseText);
@@ -2805,10 +2972,15 @@ function intelligentUIContentSections(root) {
             onload: (res) => {
                 if (res.status === 200) {
                     const page = JSON.parse(res.responseText);
+                    const fitHTML = hasHTML ? () => {
+                        const pageId = page.id.replace(/-/g, '');
+                        GM_setValue('cgpt_ui_height_' + pageId, blocks.filter(block => block.embed?.file_upload).length);
+                        GM_openInTab(`https://app.notion.com/p/${pageId}`, {active: false, insert: true, setParent: true});
+                    } : undefined;
                     const remaining = hasHTML ? blocks : blocks.slice(NOTION_BLOCK_BATCH_SIZE);
                     if (remaining.length > 0) {
                         setTimeout(() => {
-                            appendBlocksBatch(page.id, remaining, token, statusCallback, blocks.length, hasHTML ? 0 : NOTION_BLOCK_BATCH_SIZE);
+                            appendBlocksBatch(page.id, remaining, token, statusCallback, blocks.length, hasHTML ? 0 : NOTION_BLOCK_BATCH_SIZE, fitHTML);
                         }, NOTION_RATE_LIMIT_DELAY);
                     } else {
                         statusCallback('✅ Saved!');

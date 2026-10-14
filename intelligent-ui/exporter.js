@@ -192,7 +192,8 @@
         const data = { ...bundle, code: '/* Program embedded at export time. */' };
         const compressed = await new Response(new Blob([JSON.stringify(data)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
         return template.replace('/*__CGPT_UI_PROGRAM__*/', () => program.replace(/<\/script/gi, '<\\/script'))
-            .replace('__CGPT_UI_DATA__', () => intelligentUIBase64(new Uint8Array(compressed)));
+            .replace('__CGPT_UI_DATA__', () => intelligentUIBase64(new Uint8Array(compressed)))
+            .replace('</html>', () => `<script>(${reportIntelligentUIHeight.toString()})();</script></html>`);
     }
 
     async function uploadIntelligentUIHTML(html, messageId, token) {
