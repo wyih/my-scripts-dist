@@ -6,8 +6,23 @@
         if (!turn || getRoleFromWrapper(turn) === 'user' || turn.getAttribute('data-privacy-skip') === 'true') return [];
         return [...(turn.matches(INTELLIGENT_UI_SELECTOR) ? [turn] : []), ...turn.querySelectorAll(INTELLIGENT_UI_SELECTOR)]
             .filter(root => root.getAttribute('data-dil-message-id')?.trim() && !root.parentElement?.closest(INTELLIGENT_UI_SELECTOR))
-            .filter(root => [...root.querySelectorAll('form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"], [data-d-component="svg"], .recharts-wrapper, .mermaid, .leaflet-container, [data-widget-share-button], canvas, iframe')]
+            .filter(root => [...root.querySelectorAll('form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"], [data-d-component="svg"], [data-d-component="row"], [data-d-component="grid"], .recharts-wrapper, .mermaid, .leaflet-container, [data-widget-share-button], canvas, iframe')]
                 .some(node => !node.closest('pre, [data-code-block="true"], [data-markdown-copy="code-block"], [data-markdown-copy="exclude"], [data-d-component="popover-trigger"]') && !isIgnorableChatGPTFileReference(node)));
+    }
+
+    function splitIntelligentUIRoot(root, original) {
+        for (const section of intelligentUIContentSections(root)) {
+            if (section.native) continue;
+            const placeholder = document.createElement('div');
+            placeholder._cgptIntelligentUI = {
+                root: original, messageId: original.getAttribute('data-dil-message-id'),
+                conversationUrl: location.origin + location.pathname,
+                uiSection: section.uiIndex,
+                fallback: processNodesToBlocks(section.nodes, new Set()),
+            };
+            section.nodes[0].before(placeholder);
+            section.nodes.forEach(node => node.remove());
+        }
     }
 
     function intelligentUIBundle(message, messageId, conversationUrl) {
@@ -125,7 +140,7 @@
 
     async function getIntelligentUITemplate(bundle) {
         const full = bundle.contentReferences.some(ref => ref?.data?.language === 'mermaid' && !/^\s*(?:flowchart|graph)\b/.test(ref.data.content || ''));
-        const name = full ? 'runtime-v2-full.html' : 'runtime-v2.html';
+        const name = full ? 'runtime-v3-full.html' : 'runtime-v3.html';
         if (!intelligentUITemplates.has(name)) {
             // Versioned filenames also key the persistent cache; bump them when runtime assets change.
             const cacheKey = `cgpt_ui_runtime:${name}`;
@@ -206,17 +221,18 @@
 
     async function processIntelligentUI(blocks, token, updateStatus) {
         if (!blocks.some(block => block._cgptIntelligentUI)) return blocks;
-        const context = {}, output = [];
+        const context = {}, output = [], bundles = new Map();
         for (const block of blocks) {
             const descriptor = block._cgptIntelligentUI;
             if (!descriptor) { output.push(block); continue; }
             try {
                 updateStatus('🧩 Intelligent UI...');
-                const bundle = await extractIntelligentUI(descriptor, context);
+                if (!bundles.has(descriptor.messageId)) bundles.set(descriptor.messageId, extractIntelligentUI(descriptor, context).then(async bundle => ({bundle, missing: await bundleIntelligentUIImages(bundle)})));
+                const {bundle: originalBundle, missing} = await bundles.get(descriptor.messageId);
+                const bundle = { ...originalBundle, uiSection: descriptor.uiSection };
                 const template = await getIntelligentUITemplate(bundle);
-                const missing = await bundleIntelligentUIImages(bundle);
                 const html = await buildIntelligentUIHTML(bundle, template);
-                output.push(await uploadIntelligentUIHTML(html, descriptor.messageId, token));
+                output.push(await uploadIntelligentUIHTML(html, `${descriptor.messageId}-section-${descriptor.uiSection + 1}`, token));
                 if (missing.length) output.push(intelligentUINotice(`Intelligent UI：${missing.length} 张图片未能打包，仍使用原图片链接。`));
             } catch (error) {
                 console.warn('[ChatGPT→Notion] Intelligent UI export failed:', error.message);

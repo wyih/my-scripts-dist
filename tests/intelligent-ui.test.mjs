@@ -5,7 +5,7 @@ import {gunzipSync} from 'node:zlib';
 import {JSDOM, VirtualConsole} from 'jsdom';
 const read = path => fs.readFileSync(new URL('../' + path, import.meta.url), 'utf8');
 const source = process.env.CHATGPT_EXPORTER_SCRIPT ? fs.readFileSync(process.env.CHATGPT_EXPORTER_SCRIPT,'utf8') : read('ChatGPT exporter.js');
-const exports = ['getIntelligentUIRoots','intelligentUIBundle','intelligentUIMessageFromHTML','extractIntelligentUI','buildIntelligentUIHTML','processIntelligentUI','getChatBlocks','createPageAndUpload'];
+const exports = ['getIntelligentUIRoots','intelligentUIContentSections','intelligentUIBundle','intelligentUIMessageFromHTML','extractIntelligentUI','buildIntelligentUIHTML','processIntelligentUI','getChatBlocks','createPageAndUpload'];
 const dom = new JSDOM('<!doctype html><body></body>', {url:'https://chatgpt.com/c/test',runScripts:'outside-only'});
 const w=dom.window, requests=[];
 for(const n of ['Blob','Response','TextEncoder','TextDecoder','CompressionStream','DecompressionStream'])w[n]=globalThis[n];
@@ -33,6 +33,17 @@ const blocks=api.getChatBlocks([turns[1]]);
 assert.equal(blocks.filter(b=>b._cgptIntelligentUI).length,1);
 assert.equal(blocks.filter(b=>b.type==='paragraph').length,2);
 assert.equal(api.getChatBlocks().filter(b=>b._cgptIntelligentUI).length,1);
+const mixed=w.document.createElement('div');mixed.dataset.messageAuthorRole='assistant';
+mixed.innerHTML=`<div data-dil-message-id="${id}"><div data-d-component="box"><h2 data-d-component="title">原生标题</h2><p data-d-component="text">保留<span data-d-default-strong>加粗</span>文字</p><div data-d-component="box" style="border:1px solid var(--color-border)"><button>计算</button><p>动态结果</p></div><div data-d-component="row"><button>更新统计</button></div><p>图表说明</p><table><tr><th>日期</th></tr><tr><td>今天</td></tr></table><pre><code>  print(1)\n</code></pre><div class="recharts-wrapper"><svg></svg></div><p>末尾文字</p></div></div>`;
+const mixedBlocks=api.getChatBlocks([mixed]);
+assert.deepEqual(Array.from(mixedBlocks,b=>b.type||'ui'),['heading_3','heading_2','paragraph','ui','paragraph','table','code','ui','paragraph','divider']);
+assert.deepEqual(Array.from(mixedBlocks.filter(b=>b._cgptIntelligentUI),b=>b._cgptIntelligentUI.uiSection),[0,1]);
+assert(mixedBlocks.find(b=>b.type==='paragraph').paragraph.rich_text.some(t=>t.annotations.bold&&t.text.content==='加粗'));
+assert(!JSON.stringify(mixedBlocks.filter(b=>b.type)).includes('动态结果'));
+assert.equal(mixedBlocks.find(b=>b.type==='code').code.rich_text[0].text.content,'  print(1)\n');
+assert.equal(mixedBlocks.find(b=>b.type==='table').table.has_row_header,false,'a column heading does not make the entire first column a row heading');
+const fileTurn=mixed.cloneNode(true);fileTurn.querySelector('p').innerHTML='资料<span data-d-component="popover-trigger"><span data-d-component="badge">notes.md</span></span>';
+assert.equal(api.getChatBlocks([fileTurn]).find(b=>b.type==='paragraph').paragraph.rich_text.find(t=>t.text.content==='notes.md').text.link.url,w.location.origin+w.location.pathname);
 // Ordinary replies now carry the same renderer marker, including runnable code editors.
 const staticTurn=w.document.createElement('div');staticTurn.dataset.messageAuthorRole='assistant';
 staticTurn.innerHTML=`<div data-dil-message-id="static"><p data-d-component="text">普通回答</p><h3 data-d-component="title">Python</h3><div data-code-block="true" data-markdown-copy="code-block"><div data-markdown-copy="exclude">Python<button>复制代码</button><button>运行</button><button>预览</button></div><div class="cm-content" data-language="python" role="textbox"><div class="cm-line">  <span>def</span> <span>greet</span>():</div><div class="cm-line">    return 1</div><div class="cm-line"><br></div><div class="cm-line">greet()</div><div class="cm-line"><br></div></div></div><p>普通文件引用<span data-d-component="popover-trigger"><button>notes.md</button></span></p></div>`;
@@ -65,7 +76,7 @@ let htmlFetches=0;
 w.fetch=async url=>String(url).includes('/backend-api/')?{ok:false,status:404}:{ok:true,text:async()=>{htmlFetches++;return streamedHTML;}};
 assert.equal((await api.extractIntelligentUI(descriptor,{})).code,program);
 assert.equal(htmlFetches,1);
-const template=read('intelligent-ui/runtime-v2.html');
+const template=read('intelligent-ui/runtime-v3.html');
 const bundle=api.intelligentUIBundle(message(id),id,w.location.href);
 const html=await api.buildIntelligentUIHTML(bundle,template);
 assert(!html.includes('__CGPT_UI_DATA__') && !html.includes('__CGPT_UI_PROGRAM__'));
@@ -81,7 +92,7 @@ w.GM_xmlhttpRequest=req=>{requests.push(req);if(req.url.includes('raw.githubuser
 const result=await api.processIntelligentUI(blocks,'test-token',()=>{});
 assert.equal(result.filter(b=>b.embed?.file_upload?.id===uploadId).length,1);
 assert(!result.some(b=>b._cgptIntelligentUI));
-assert(uploadedHTML === await api.buildIntelligentUIHTML({...bundle,portableImages:{}},template), 'uploaded bytes match the packaged program');
+assert(uploadedHTML === await api.buildIntelligentUIHTML({...bundle,portableImages:{},uiSection:0},template), 'uploaded bytes match the selected UI section');
 assert(requests.filter(r=>!r.url.startsWith('https://api.notion.com/')).every(r=>!r.headers?.Authorization));
 assert(!uploadedHTML.includes('test-token'));
 w.setTimeout=callback=>{callback();return 1;};
@@ -139,6 +150,7 @@ const mapElement=rw.document.createElement('div');rw.document.body.append(mapEle
 const map=rw.PortableDependencies.L.map(mapElement,{zoomControl:false}).setView([1.28,103.86],15);
 map.setZoom(16);assert.equal(map.getZoom(),16);map.remove();mapElement.remove();
 rw.addEventListener('error',e=>errors.push(e.message));
+rw.eval(read('intelligent-ui/content-sections.js'));
 rw.eval(read('intelligent-ui/portable-dom.js'));
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
 await tick();let input=rw.document.querySelector('input');assert(input,'original program rendered form');
@@ -152,6 +164,24 @@ assert(rw.document.getElementById('app').textContent.includes('验证用户的�
 [...rw.document.querySelectorAll('button')].find(b=>b.textContent==='下一张').click();await tick();
 assert.equal(rw.document.querySelector('.carousel-position').textContent,'2 / 2');
 assert.deepEqual(errors,[]);
+// Exercise the actual omissions through one mixed program, including conditional root nodes.
+rw.eval(`globalThis.PortableProgram=function(DIL,__dil){DIL.render(__dil.jsx(()=>{const [count,setCount]=DIL.useState(0,{key:'count'});return __dil.jsx(__dil.Fragment,null,__dil.jsx('text',{},'普通前文'),__dil.jsx('row',{height:'14px',radius:'full',clip:true,gap:'2px'},__dil.jsx('box',{background:'#0D9488',flex:1213.8}),__dil.jsx('box',{background:'#D6D3D1',flex:944.8})),__dil.jsx('box',{border:true},__dil.jsx('button',{onClick:()=>setCount(count+1)},'模拟'),__dil.jsx('icon',{name:'trophy',color:'success'})),count?__dil.jsx('box',{border:true},__dil.jsx('icon',{name:'check-circle-2'}),__dil.jsx('svg',{viewBox:'0 0 120 140'},__dil.jsx('text',{fontSize:33,textAnchor:'middle',x:60},'🚗')),__dil.jsx('text',{},'结果 '+count)):null,__dil.jsx('text',{},'普通后文'),__dil.jsx('grid',{columns:2},__dil.jsx('text',{},'独立卡片')))}));};`);
+rw.eval(`globalThis.sectionHost=new PortableHost({...BUNDLE,uiSection:0},update);update(sectionHost);`);
+await tick();
+const bar=rw.document.querySelector('[data-d-component="row"]');
+assert.equal(bar.style.height,'14px');assert.equal(bar.style.gap,'2px');assert.equal(bar.style.borderRadius,'9999px');assert.equal(bar.style.overflow,'hidden');
+assert.equal(bar.children[0].style.flexGrow,'1213.8');assert.equal(bar.children[1].style.flexGrow,'944.8');
+assert.equal(bar.children[0].style.background,'rgb(13, 148, 136)');
+assert(rw.document.querySelector('[data-icon="trophy"] path'));
+assert.equal(rw.document.querySelector('[data-icon="trophy"]').style.color,'rgb(0, 166, 62)');
+assert(!rw.document.getElementById('app').textContent.includes('普通'));
+assert(!rw.document.getElementById('app').textContent.includes('独立卡片'));
+rw.document.querySelector('button').click();await tick();
+assert(rw.document.getElementById('app').textContent.includes('结果 1'),'conditional game results remain in the same UI section');
+assert(rw.document.querySelector('[data-icon="check-circle-2"] path'));
+assert.equal(rw.document.querySelector('svg text').getAttribute('font-size'),'33');
+assert.equal(rw.document.querySelector('svg text').getAttribute('text-anchor'),'middle');
+assert.deepEqual(errors,[]);
 runtimeDOM.window.close();
 // New page instances share the userscript manager's storage, without preloading libraries.
 const cachedTemplates=new Map([['cgpt_ui_runtime:runtime-v1.html','old runtime']]), cacheReads=[], runtimeRequests=[];
@@ -162,7 +192,7 @@ function newLoader() {
     GM_xmlhttpRequest(req){runtimeRequests.push(req.url);req.onload({status:200,responseText:template});},
     console,
   });
-  vm.runInContext(read('intelligent-ui/exporter.js'),context);
+  vm.runInContext(read('intelligent-ui/content-sections.js')+read('intelligent-ui/exporter.js'),context);
   return context;
 }
 const firstLoader=newLoader();
@@ -171,10 +201,10 @@ assert.equal(cacheReads.length,0,'ordinary export must not even read the runtime
 assert.equal(runtimeRequests.length,0);
 assert.equal(await firstLoader.getIntelligentUITemplate(bundle),template);
 assert.equal(runtimeRequests.length,1);
-assert(runtimeRequests[0].endsWith('/runtime-v2.html'),'FileCite requires a new runtime cache version');
+assert(runtimeRequests[0].endsWith('/runtime-v3.html'),'mixed rendering requires a new runtime cache version');
 assert.equal(await newLoader().getIntelligentUITemplate(bundle),template);
 assert.equal(runtimeRequests.length,1,'refreshing the page reuses the stored runtime');
-cachedTemplates.set('cgpt_ui_runtime:runtime-v2.html','invalid cache');
+cachedTemplates.set('cgpt_ui_runtime:runtime-v3.html','invalid cache');
 assert.equal(await newLoader().getIntelligentUITemplate(bundle),template);
 assert.equal(runtimeRequests.length,2,'invalid cached data is replaced by a fresh download');
 console.log('PASS: lazy external runtime, persistent cache across page refreshes, invalid cache recovery');

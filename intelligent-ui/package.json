@@ -9,6 +9,7 @@
     "esbuild": "0.25.12",
     "katex": "0.19.0",
     "leaflet": "1.9.4",
+    "lucide": "1.56.0",
     "mermaid": "11.17.2"
   },
   "overrides": {

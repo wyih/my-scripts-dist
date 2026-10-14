@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.39
+// @version      2.40
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）+Intelligent UI 自动识别导出
 // @author       Wyih
@@ -24,7 +24,7 @@
 
     if (window.top !== window.self) return;
 
-    console.log('[ChatGPT→Notion v2.39] script loaded');
+    console.log('[ChatGPT→Notion v2.40] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -789,8 +789,12 @@
                     rt.push(makeTextRichText('\n', s, s.link));
                     return;
                 }
-                if (['B', 'STRONG'].includes(n.tagName)) ns.bold = true;
-                if (['I', 'EM'].includes(n.tagName)) ns.italic = true;
+                if (n.matches('[data-d-component="popover-trigger"]') && n.querySelector('[data-d-component="badge"]') && /\.(?:md|pdf|txt|csv|docx?|xlsx?|pptx?|json|zip)$/i.test(normalizedText(n))) {
+                    rt.push(makeTextRichText(normalizedText(n), s, { url: location.origin + location.pathname }));
+                    return;
+                }
+                if (['B', 'STRONG'].includes(n.tagName) || n.hasAttribute('data-d-default-strong')) ns.bold = true;
+                if (['I', 'EM'].includes(n.tagName) || n.getAttribute('data-d-component') === 'italic') ns.italic = true;
                 if (n.tagName === 'A' && n.href && n.href.trim() !== '') {
                     const sourceParts = getStoredChatGPTSourceCitationParts(n) || getChatGPTSourceCitationParts(n, consumedSourceAnchors);
                     if (sourceParts) {
@@ -2226,7 +2230,7 @@
 
             const firstRowCells = Array.from(rows[0].children || []).filter(el => el && (el.nodeName === 'TD' || el.nodeName === 'TH'));
             const hasColumnHeader = firstRowCells.some(c => c.nodeName === 'TH');
-            const hasRowHeader = rows.some(r => {
+            const hasRowHeader = rows.slice(hasColumnHeader ? 1 : 0).some(r => {
                 const first = Array.from(r.children || []).find(el => el && (el.nodeName === 'TD' || el.nodeName === 'TH'));
                 return first && first.nodeName === 'TH';
             });
@@ -2273,6 +2277,7 @@
 
         Array.from(nodes).forEach(n => {
             if (n._cgptIntelligentUI) { flush(); blocks.push({ _cgptIntelligentUI: n._cgptIntelligentUI }); return; }
+            if (n.getAttribute?.('data-d-component') === 'divider') { flush(); blocks.push({ object: 'block', type: 'divider', divider: {} }); return; }
             if (['SCRIPT', 'STYLE', 'SVG'].includes(n.nodeName)) return;
             if (shouldSkipChatGPTPureControlNode(n)) return;
             if (n.nodeType === 1 && isIgnorableChatGPTFileReference(n)) return;
@@ -2403,6 +2408,35 @@
     }
 
     // BEGIN INTELLIGENT UI (generated from intelligent-ui/exporter.js)
+// Used on both the source DOM and the portable DOM so section ordering agrees.
+function intelligentUIContentSections(root) {
+    const controls = 'form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"]';
+    const primitive = node => {
+        if (node.nodeType === 3) return true;
+        if (node.nodeType !== 1) return true;
+        if (node.matches('[data-code-block="true"], [data-markdown-copy="code-block"]')) return true;
+        const type = node.getAttribute('data-d-component') || node.tagName.toLowerCase();
+        if (!['text','title','caption','table','divider','math','code','blockquote','p','h1','h2','h3','h4','h5','h6','pre','hr','ul','ol'].includes(type)) return false;
+        return ![...(node.matches(controls) ? [node] : []), ...node.querySelectorAll(controls)]
+            .some(control => !control.closest('[data-d-component="popover-trigger"], [data-markdown-copy="exclude"], pre, [data-code-block="true"]'));
+    };
+    const flatten = node => {
+        const children = [...node.childNodes].filter(child => child.nodeType !== 3 || child.textContent.trim());
+        // A plain column wrapping prose and widgets can be split; cards keep their layout.
+        if (node.getAttribute?.('data-d-component') === 'box' && !/(?:^|;)\s*(?:border(?:-[\w-]+)?|background(?:-[\w-]+)?|padding(?:-[\w-]+)?)\s*:/.test(node.getAttribute('style') || '') && children.some(child => primitive(child) && child.nodeType === 1) && children.some(child => !primitive(child)) && !children.some(child => child.matches?.(controls))) return children.flatMap(flatten);
+        return [node];
+    };
+    const sections = [];
+    let uiIndex = 0;
+    for (const node of [...root.childNodes].flatMap(flatten)) {
+        if (node.nodeType === 3 && !node.textContent.trim()) continue;
+        const native = primitive(node);
+        if (!native && sections.at(-1)?.native === false) sections.at(-1).nodes.push(node);
+        else sections.push({ native, nodes: [node], ...(!native ? { uiIndex: uiIndex++ } : {}) });
+    }
+    return sections;
+}
+
     // The DIL renderer also renders ordinary prose. Require a widget or content control.
     const INTELLIGENT_UI_SELECTOR = '[data-dil-message-id]';
     const intelligentUITemplates = new Map();
@@ -2411,8 +2445,23 @@
         if (!turn || getRoleFromWrapper(turn) === 'user' || turn.getAttribute('data-privacy-skip') === 'true') return [];
         return [...(turn.matches(INTELLIGENT_UI_SELECTOR) ? [turn] : []), ...turn.querySelectorAll(INTELLIGENT_UI_SELECTOR)]
             .filter(root => root.getAttribute('data-dil-message-id')?.trim() && !root.parentElement?.closest(INTELLIGENT_UI_SELECTOR))
-            .filter(root => [...root.querySelectorAll('form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"], [data-d-component="svg"], .recharts-wrapper, .mermaid, .leaflet-container, [data-widget-share-button], canvas, iframe')]
+            .filter(root => [...root.querySelectorAll('form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"], [data-d-component="svg"], [data-d-component="row"], [data-d-component="grid"], .recharts-wrapper, .mermaid, .leaflet-container, [data-widget-share-button], canvas, iframe')]
                 .some(node => !node.closest('pre, [data-code-block="true"], [data-markdown-copy="code-block"], [data-markdown-copy="exclude"], [data-d-component="popover-trigger"]') && !isIgnorableChatGPTFileReference(node)));
+    }
+
+    function splitIntelligentUIRoot(root, original) {
+        for (const section of intelligentUIContentSections(root)) {
+            if (section.native) continue;
+            const placeholder = document.createElement('div');
+            placeholder._cgptIntelligentUI = {
+                root: original, messageId: original.getAttribute('data-dil-message-id'),
+                conversationUrl: location.origin + location.pathname,
+                uiSection: section.uiIndex,
+                fallback: processNodesToBlocks(section.nodes, new Set()),
+            };
+            section.nodes[0].before(placeholder);
+            section.nodes.forEach(node => node.remove());
+        }
     }
 
     function intelligentUIBundle(message, messageId, conversationUrl) {
@@ -2530,7 +2579,7 @@
 
     async function getIntelligentUITemplate(bundle) {
         const full = bundle.contentReferences.some(ref => ref?.data?.language === 'mermaid' && !/^\s*(?:flowchart|graph)\b/.test(ref.data.content || ''));
-        const name = full ? 'runtime-v2-full.html' : 'runtime-v2.html';
+        const name = full ? 'runtime-v3-full.html' : 'runtime-v3.html';
         if (!intelligentUITemplates.has(name)) {
             // Versioned filenames also key the persistent cache; bump them when runtime assets change.
             const cacheKey = `cgpt_ui_runtime:${name}`;
@@ -2611,17 +2660,18 @@
 
     async function processIntelligentUI(blocks, token, updateStatus) {
         if (!blocks.some(block => block._cgptIntelligentUI)) return blocks;
-        const context = {}, output = [];
+        const context = {}, output = [], bundles = new Map();
         for (const block of blocks) {
             const descriptor = block._cgptIntelligentUI;
             if (!descriptor) { output.push(block); continue; }
             try {
                 updateStatus('🧩 Intelligent UI...');
-                const bundle = await extractIntelligentUI(descriptor, context);
+                if (!bundles.has(descriptor.messageId)) bundles.set(descriptor.messageId, extractIntelligentUI(descriptor, context).then(async bundle => ({bundle, missing: await bundleIntelligentUIImages(bundle)})));
+                const {bundle: originalBundle, missing} = await bundles.get(descriptor.messageId);
+                const bundle = { ...originalBundle, uiSection: descriptor.uiSection };
                 const template = await getIntelligentUITemplate(bundle);
-                const missing = await bundleIntelligentUIImages(bundle);
                 const html = await buildIntelligentUIHTML(bundle, template);
-                output.push(await uploadIntelligentUIHTML(html, descriptor.messageId, token));
+                output.push(await uploadIntelligentUIHTML(html, `${descriptor.messageId}-section-${descriptor.uiSection + 1}`, token));
                 if (missing.length) output.push(intelligentUINotice(`Intelligent UI：${missing.length} 张图片未能打包，仍使用原图片链接。`));
             } catch (error) {
                 console.warn('[ChatGPT→Notion] Intelligent UI export failed:', error.message);
@@ -2679,11 +2729,7 @@
             const clonedRoots = [...clone.querySelectorAll(INTELLIGENT_UI_SELECTOR), ...(clone.matches(INTELLIGENT_UI_SELECTOR) ? [clone] : [])]
                 .filter(root => uiRoots.some(original => original.getAttribute('data-dil-message-id') === root.getAttribute('data-dil-message-id')));
             clonedRoots.forEach(root => {
-                root._cgptIntelligentUI = {
-                    root: uiRoots.find(original => original.getAttribute('data-dil-message-id') === root.getAttribute('data-dil-message-id')), messageId: root.getAttribute('data-dil-message-id'),
-                    conversationUrl: location.origin + location.pathname,
-                    fallback: processNodesToBlocks(root.childNodes, new Set()),
-                };
+                splitIntelligentUIRoot(root, uiRoots.find(original => original.getAttribute('data-dil-message-id') === root.getAttribute('data-dil-message-id')));
             });
             children.push(...processNodesToBlocks(clone._cgptIntelligentUI ? [clone] : clone.childNodes, new Set()));
             attachments.forEach(({ file, control }) => children.push({

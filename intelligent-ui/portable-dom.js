@@ -3,7 +3,12 @@ const status = document.getElementById('status');
 const svgNS = 'http://www.w3.org/2000/svg';
 const make = (tag, text) => {const el=document.createElement(tag);if(text!=null)el.textContent=text;return el;};
 const safeUrl = value => {try {const u=new URL(value);return ['https:','http:'].includes(u.protocol)?u.href:'';}catch{return '';}};
-const {katex,mermaid,L}=PortableDependencies;
+const {katex,mermaid,L,icons,createIcon}=PortableDependencies;
+const colors={default:'#172033',secondary:'#64748b',subtle:'#94a3b8',success:'#00a63e',danger:'#dc2626',warning:'#d97706',info:'#2563eb','surface-primary':'#ffffff','surface-secondary':'#f3f5f8'};
+const color=value=>colors[value]||value;
+const sizes={'2xs':'0.7rem',xs:'0.75rem',sm:'0.88rem',md:'1rem',lg:'1.2rem',xl:'1.5rem','2xl':'2rem'};
+const length=value=>typeof value==='number'?value+'px':value;
+const spacing=value=>typeof value==='number'?value*4+'px':value;
 mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'default',flowchart:{htmlLabels:false}});
 const widgetCache=new Map();
 let mounts=[];
@@ -30,11 +35,17 @@ function update(host) {
     const scroller=document.scrollingElement;
     const scrollPosition={top:scroller.scrollTop,left:scroller.scrollLeft};
     mounts=[];
-    app.replaceChildren(renderNode(host,0));
-    for(const mount of mounts)mount();
+    const rendered=renderNode(host,0);
+    if(host.bundle.uiSection!=null){
+      const section=intelligentUIContentSections(rendered).find(section=>!section.native&&section.uiIndex===host.bundle.uiSection);
+      if(!section){status.textContent='运行失败：找不到指定的 UI 部分';return;}
+      rendered.replaceChildren(...section.nodes);
+    }
+    app.replaceChildren(rendered);
+    for(const entry of mounts)if(app.contains(entry.element))entry.mount();
     scroller.scrollTop=scrollPosition.top;scroller.scrollLeft=scrollPosition.left;
     if(activeId){const next=app.querySelector(`[data-node-id="${activeId}"]`);next?.focus({preventScroll:true});if(selection)next?.setSelectionRange?.(...selection);}
-    status.textContent='原程序正在运行 · '+host.nodes.size+' 个界面节点';
+    status.textContent='';
   });
 }
 function widget(host,id){
@@ -44,7 +55,7 @@ function widget(host,id){
   if(data.widget_type==='charts_widget_v2')return chart(data.content);
   if(data.language==='mermaid'||data.widget_type==='map_widget_v2'){
     if(!widgetCache.has(id))widgetCache.set(id,data.language==='mermaid'?diagram(data):mapWidget(data));
-    const entry=widgetCache.get(id);mounts.push(entry.mount);return entry.element;
+    const entry=widgetCache.get(id);mounts.push(entry);return entry.element;
   }
   return make('pre',JSON.stringify(data,null,2));
 }
@@ -100,6 +111,8 @@ function mapWidget(data){
 }
 function chart(c){
   const wrap=make('div');wrap.className='chart';
+  if(c.meta?.title||c.title)wrap.append(make('strong',c.meta?.title||c.title));
+  if(c.meta?.description||c.description)wrap.append(make('p',c.meta?.description||c.description));
   const s=document.createElementNS(svgNS,'svg');s.setAttribute('viewBox','0 0 600 260');s.setAttribute('role','img');s.setAttribute('aria-label',c.series?.[0]?.label||'图表');
   const add=(tag,attrs,text)=>{const e=document.createElementNS(svgNS,tag);for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!=null)e.textContent=text;s.append(e);return e;};
   const colors=['#2563eb','#14b8a6','#f59e0b','#a855f7'];
@@ -157,13 +170,20 @@ function renderNode(host,id,context={}){
     e.value=p.value??'';e.setAttribute('aria-label',p.placeholder||p.label||t);
     e.oninput=()=>p.onChange?.(t==='slider'?Number(e.value):e.value);return e;
   }
-  if(t==='icon')return make('span');
-  if(t==='math'){const e=make('div');e.className='math-render';e.innerHTML=katex.renderToString(p.value||'',{displayMode:!p.inline,throwOnError:false,trust:false});return e;}
+  if(t==='icon'){
+    const name=String(p.name||'').replace(/(^|-)([a-z0-9])/g,(_,dash,letter)=>letter.toUpperCase());
+    const e=icons[name]?createIcon(icons[name],{width:'1em',height:'1em','aria-hidden':'true'}):make('span',p.name||'图标');
+    e.dataset.icon=p.name;e.style.fontSize=sizes[p.size]||length(p.size||16);e.style.color=p.color?color(p.color):'inherit';e.style.flexShrink='0';e.style.verticalAlign='-0.15em';
+    if(p.inline)e.style.marginRight='0.3em';
+    return e;
+  }
+  if(t==='math'){const e=make('div');e.className='math-render';e.setAttribute('data-d-component','math');e.innerHTML=katex.renderToString(p.value||'',{displayMode:!p.inline,throwOnError:false,trust:false});return e;}
   const tags={root:'div',title:p.size==='xl'?'h1':'h2',text:'div',caption:'small',bold:'strong',italic:'em',underline:'u',strikethrough:'s',code:'code',blockquote:'blockquote',divider:'hr',button:'button',pressable:'button',form:'form',label:'label',table:'table','table-row':'tr','table-cell':p.header?'th':'td','popover':'details','popover-trigger':'summary'};
   const isSvg=context.svg||t==='svg';
   const e=isSvg?document.createElementNS(svgNS,t):make(tags[t]||'div');
-  if(isSvg){for(const[k,v]of Object.entries(p))if(typeof v!=='function'&&!k.startsWith('__'))e.setAttribute(k,v);}
+  if(isSvg){for(const[k,v]of Object.entries(p))if(typeof v!=='function'&&!k.startsWith('__'))e.setAttribute(['viewBox','preserveAspectRatio','gradientUnits'].includes(k)?k:k.replace(/[A-Z]/g,c=>'-'+c.toLowerCase()),v);}
   e.dataset.nodeId=id;
+  e.setAttribute('data-d-component',t);
   if(t==='radio-group')context={...context,radio:p};
   if(t==='svg')context={...context,svg:true};
   if(t==='button'||t==='pressable'){
@@ -171,6 +191,9 @@ function renderNode(host,id,context={}){
     e.type='button';e.disabled=Boolean(p.disabled);
     if(p.submit||p.type==='submit')e.onclick=event=>{event.preventDefault();p.onClick?.();context.form?.onSubmit?.();};
     else if(p.onClick)e.onclick=()=>p.onClick();
+    e.style.display='inline-flex';e.style.alignItems='center';e.style.justifyContent='center';
+    if(p.block||t==='pressable')e.style.width='100%';
+    if(t==='button'&&p.variant!=='outline'){e.style.background='#111';e.style.color='white';e.style.borderColor='#111';e.style.borderRadius='9999px';}
   }
   if(t==='form'){
     context={...context,form:p};
@@ -178,7 +201,7 @@ function renderNode(host,id,context={}){
     e.onkeydown=event=>{if(event.key==='Enter'&&event.target.tagName==='INPUT'&&!['range','checkbox','radio'].includes(event.target.type)){event.preventDefault();p.onSubmit?.();}};
   }
   if(t==='grid'){e.style.display='grid';e.style.gridTemplateColumns=p.columns?`repeat(${p.columns},minmax(0,1fr))`:`repeat(auto-fit,minmax(min(100%,${p.minChildWidth||240}px),1fr))`;}
-  if(t==='row'){e.style.display='flex';e.style.flexWrap='wrap';}
+  if(t==='row'){e.style.display='flex';e.style.flexWrap=p.wrap?'wrap':'nowrap';}
   if(t==='box'||t==='form'){e.style.display='flex';e.style.flexDirection='column';}
   if(t==='carousel'){
     const nav=make('div'),track=make('div');nav.className='segments';track.className='carousel-track';
@@ -188,18 +211,21 @@ function renderNode(host,id,context={}){
     for(let i=0;i<n.children.length;i++)track.append(renderNode(host,n.children[(index+i)%n.children.length],context));
     e.append(nav,track);return e;
   }
-  const sizes={xs:'0.75rem',sm:'0.88rem',md:'1rem',lg:'1.2rem',xl:'1.5rem','2xl':'2rem'};
-  if(p.size)e.style.fontSize=sizes[p.size]||'';
-  if(p.gap!=null)e.style.gap=p.gap*4+'px';
-  if(p.padding!=null)e.style.padding=p.padding*4+'px';
+  if(p.size)e.style.fontSize=sizes[p.size]||length(p.size);
+  if(p.gap!=null)e.style.gap=spacing(p.gap);
+  if(p.padding!=null)e.style.padding=spacing(p.padding);
   if(p.border)e.style.border='1px solid #dbe1e8';
-  if(p.radius)e.style.borderRadius={sm:4,md:8,lg:12,xl:16}[p.radius]+'px';
-  if(p.background)e.style.background='#f3f5f8';
-  if(p.color==='secondary')e.style.color='#64748b';
+  if(p.radius)e.style.borderRadius=length({sm:4,md:8,lg:12,xl:16,'2xl':24,full:9999}[p.radius]??p.radius);
+  if(p.background)e.style.background=color(p.background);
+  if(p.color&&!(t==='button'&&p.variant!=='outline'))e.style.color=color(p.color);
   if(p.weight==='medium')e.style.fontWeight='600';
-  for(const k of ['width','maxWidth','height','aspectRatio','textAlign'])if(p[k]!=null)e.style[k]=p[k];
+  for(const k of ['width','maxWidth','minWidth','height','maxHeight','minHeight'])if(p[k]!=null)e.style[k]=length(p[k]);
+  for(const k of ['aspectRatio','textAlign','flex'])if(p[k]!=null)e.style[k]=p[k];
+  if(p.direction)e.style.flexDirection={col:'column',row:'row'}[p.direction]||p.direction;
+  if(p.clip)e.style.overflow='hidden';
+  if(p.tabularNums)e.style.fontVariantNumeric='tabular-nums';
   if(p.align)e.style.alignItems=p.align;
-  if(p.justify)e.style.justifyContent={between:'space-between',center:'center'}[p.justify]||p.justify;
+  if(p.justify)e.style.justifyContent={between:'space-between',center:'center',start:'flex-start',end:'flex-end'}[p.justify]||p.justify;
   if(t==='title'||t==='text')e.style.margin='0';
   e.append(...n.children.map(c=>renderNode(host,c,context)));
   return e;
