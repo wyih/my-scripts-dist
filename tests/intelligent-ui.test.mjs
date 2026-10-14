@@ -33,6 +33,18 @@ const blocks=api.getChatBlocks([turns[1]]);
 assert.equal(blocks.filter(b=>b._cgptIntelligentUI).length,1);
 assert.equal(blocks.filter(b=>b.type==='paragraph').length,2);
 assert.equal(api.getChatBlocks().filter(b=>b._cgptIntelligentUI).length,1);
+// Ordinary replies now carry the same renderer marker, including runnable code editors.
+const staticTurn=w.document.createElement('div');staticTurn.dataset.messageAuthorRole='assistant';
+staticTurn.innerHTML=`<div data-dil-message-id="static"><p data-d-component="text">普通回答</p><h3 data-d-component="title">Python</h3><div data-code-block="true" data-markdown-copy="code-block"><div data-markdown-copy="exclude">Python<button>复制代码</button><button>运行</button><button>预览</button></div><div class="cm-content" data-language="python" role="textbox"><div class="cm-line">  <span>def</span> <span>greet</span>():</div><div class="cm-line">    return 1</div><div class="cm-line"><br></div><div class="cm-line">greet()</div><div class="cm-line"><br></div></div></div><p>普通文件引用<span data-d-component="popover-trigger"><button>notes.md</button></span></p></div>`;
+assert.equal(api.getIntelligentUIRoots(staticTurn).length,0);
+const staticBlocks=api.getChatBlocks([staticTurn]);
+assert(!staticBlocks.some(b=>b._cgptIntelligentUI));
+assert.equal(staticBlocks.filter(b=>b.type==='code').length,1);
+assert.equal(staticBlocks.find(b=>b.type==='code').code.language,'python');
+assert.equal(staticBlocks.find(b=>b.type==='code').code.rich_text.map(t=>t.text.content).join(''),'  def greet():\n    return 1\n\ngreet()\n');
+assert.equal(await api.processIntelligentUI(staticBlocks,'token',()=>{}),staticBlocks);
+const chartTurn=staticTurn.cloneNode(true);chartTurn.querySelector('[data-dil-message-id]').insertAdjacentHTML('beforeend','<div class="recharts-wrapper"><svg role="application"></svg></div>');
+assert.equal(api.getIntelligentUIRoots(chartTurn).length,1,'a chart still requires the portable renderer');
 assert.equal(api.intelligentUIBundle(message('wrong'),id,w.location.href),null);
 assert.throws(()=>api.intelligentUIBundle({...message(id),status:'in_progress'},id,w.location.href),/仍在生成/);
 const unsupported=message(id);unsupported.metadata.model_dil_v2.requiredComponents=['UnknownWidget'];
@@ -53,7 +65,7 @@ let htmlFetches=0;
 w.fetch=async url=>String(url).includes('/backend-api/')?{ok:false,status:404}:{ok:true,text:async()=>{htmlFetches++;return streamedHTML;}};
 assert.equal((await api.extractIntelligentUI(descriptor,{})).code,program);
 assert.equal(htmlFetches,1);
-const template=read('intelligent-ui/runtime-v1.html');
+const template=read('intelligent-ui/runtime-v2.html');
 const bundle=api.intelligentUIBundle(message(id),id,w.location.href);
 const html=await api.buildIntelligentUIHTML(bundle,template);
 assert(!html.includes('__CGPT_UI_DATA__') && !html.includes('__CGPT_UI_PROGRAM__'));
@@ -94,7 +106,6 @@ if (process.argv[2]) {
   for(const script of realHTML.matchAll(/<script>([\s\S]*?)<\/script>/g))new vm.Script(script[1]);
   console.log('PASS: real answer constants, source code and complete HTML syntax');
 }
-dom.window.close();
 // Run original state logic and submit/carousel DOM callbacks without dynamic Function construction.
 const errors=[];
 const runtimeDOM=new JSDOM('<!doctype html><main><div id="status"></div><div id="app"></div></main>',{runScripts:'outside-only',pretendToBeVisual:true,virtualConsole:new VirtualConsole()});
@@ -102,10 +113,18 @@ const rw=runtimeDOM.window;
 Object.defineProperty(rw.document,'scrollingElement',{value:rw.document.documentElement});
 for(const n of ['TextEncoder','TextDecoder'])rw[n]=globalThis[n];
 rw.eval(read('intelligent-ui/engine-v14.js'));
-rw.eval(`globalThis.PortableProgram=function(DIL,__dil,Cite,Link,AsyncImage,GenUI,Date){${program}}`);
+const fileMessage=message(id);
+fileMessage.metadata.model_dil_v2.requiredComponents=['FileCite'];
+fileMessage.metadata.model_dil_v2.code=program.replace("__dil.jsx('text',{},summary)","__dil.jsx('text',{},summary,__dil.jsx(FileCite,{ref:'turn0file0',line_range_start:158,line_range_end:200,__resolutionId:'file-ref'}))");
+fileMessage.metadata.model_dil_v2.appData={opGenui:{componentResults:{'file-ref':{componentName:'FileCite',status:'resolved',state:{file_name:'notes.md',safe_file_url:null,file_action_payload:{snippet:'source excerpt'}}}}}};
+const fileBundle=api.intelligentUIBundle(fileMessage,id,w.location.href);
+assert.deepEqual([...fileBundle.requiredComponents],['FileCite']);
+const fileHTML=await api.buildIntelligentUIHTML(fileBundle,template);
+dom.window.close();
+rw.eval([...fileHTML.matchAll(/<script>([\s\S]*?)<\/script>/g)][1][1]);
 rw.eval('globalThis.Function=function(){throw new Error("unsafe-eval forbidden")}');
 rw.eval(read('intelligent-ui/portable-host.js'));
-rw.BUNDLE=bundle;
+rw.BUNDLE=fileBundle;
 const dependencyPayload=[...template.matchAll(/unpack\('([A-Za-z0-9+/=]+)'\)/g)][0][1];
 rw.structuredClone=structuredClone;
 rw.eval(gunzipSync(Buffer.from(dependencyPayload,'base64')).toString());
@@ -123,6 +142,10 @@ rw.addEventListener('error',e=>errors.push(e.message));
 rw.eval(read('intelligent-ui/portable-dom.js'));
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
 await tick();let input=rw.document.querySelector('input');assert(input,'original program rendered form');
+const fileCite=rw.document.querySelector('.portable-file-cite');assert(fileCite,'required FileCite is rendered, not swallowed by the source program');
+assert.equal(fileCite.querySelector('summary').textContent,'notes.md');
+assert(fileCite.textContent.includes('158–200') && fileCite.textContent.includes('source excerpt'));
+assert.equal(fileCite.querySelector('a').href,fileBundle.conversationUrl);
 input.value='验证用户';input.dispatchEvent(new rw.Event('input',{bubbles:true}));await tick();
 [...rw.document.querySelectorAll('button')].find(b=>b.textContent==='生成行程摘要').click();await tick();
 assert(rw.document.getElementById('app').textContent.includes('验证用户的行程'));
@@ -131,7 +154,7 @@ assert.equal(rw.document.querySelector('.carousel-position').textContent,'2 / 2'
 assert.deepEqual(errors,[]);
 runtimeDOM.window.close();
 // New page instances share the userscript manager's storage, without preloading libraries.
-const cachedTemplates=new Map(), cacheReads=[], runtimeRequests=[];
+const cachedTemplates=new Map([['cgpt_ui_runtime:runtime-v1.html','old runtime']]), cacheReads=[], runtimeRequests=[];
 function newLoader() {
   const context=vm.createContext({
     GM_getValue(key,fallback){cacheReads.push(key);return cachedTemplates.get(key)??fallback;},
@@ -148,9 +171,10 @@ assert.equal(cacheReads.length,0,'ordinary export must not even read the runtime
 assert.equal(runtimeRequests.length,0);
 assert.equal(await firstLoader.getIntelligentUITemplate(bundle),template);
 assert.equal(runtimeRequests.length,1);
+assert(runtimeRequests[0].endsWith('/runtime-v2.html'),'FileCite requires a new runtime cache version');
 assert.equal(await newLoader().getIntelligentUITemplate(bundle),template);
 assert.equal(runtimeRequests.length,1,'refreshing the page reuses the stored runtime');
-cachedTemplates.set('cgpt_ui_runtime:runtime-v1.html','invalid cache');
+cachedTemplates.set('cgpt_ui_runtime:runtime-v2.html','invalid cache');
 assert.equal(await newLoader().getIntelligentUITemplate(bundle),template);
 assert.equal(runtimeRequests.length,2,'invalid cached data is replaced by a fresh download');
 console.log('PASS: lazy external runtime, persistent cache across page refreshes, invalid cache recovery');

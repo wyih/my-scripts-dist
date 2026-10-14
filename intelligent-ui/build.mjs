@@ -29,7 +29,7 @@ const html=`<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="vie
 <script>${scriptSafe(runtime)}</script><script>/*__CGPT_UI_PROGRAM__*/</script><script>${scriptSafe(read('portable-host.js'))}</script>
 <script>(async()=>{try{const unpack=async data=>new Response(new Blob([Uint8Array.from(atob(data),c=>c.charCodeAt(0))]).stream().pipeThrough(new DecompressionStream('gzip'))).text();const dependencies=document.createElement('script');dependencies.textContent=await unpack('${dependencyPayload}');document.head.append(dependencies);const BUNDLE=JSON.parse(await unpack('__CGPT_UI_DATA__'));${scriptSafe(read('portable-dom.js'))}}catch(e){document.getElementById('status').textContent='运行失败：'+e.message;}})();</script></html>`;
 
-const output=path.join(dir,full?'runtime-v1-full.html':'runtime-v1.html');
+const output=path.join(dir,full?'runtime-v2-full.html':'runtime-v2.html');
 fs.writeFileSync(output,html);
 console.log(path.basename(output),Buffer.byteLength(html),'bytes');
 

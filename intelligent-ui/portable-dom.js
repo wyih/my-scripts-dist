@@ -125,6 +125,16 @@ function renderNode(host,id,context={}){
   if(t==='portable-cite'){
     const span=make('span');for(const item of component?.items||[]){const a=make('a',` [${item.source_label}]`);a.href=safeUrl(item.url);a.target='_blank';a.rel='noopener';span.append(a);}return span;
   }
+  if(t==='portable-file-cite'){
+    const file=component?.file_action_payload;
+    const details=make('details');details.className='portable-file-cite';
+    details.append(make('summary',component?.file_name||file?.file_name||p.ref||'文件引用'));
+    if(p.line_range_start!=null)details.append(make('small',`引用行：${p.line_range_start}–${p.line_range_end??p.line_range_start}`));
+    if(file?.snippet)details.append(make('pre',file.snippet));
+    const url=safeUrl(component?.safe_file_url)||safeUrl(host.bundle.conversationUrl);
+    if(url){const a=make('a',component?.safe_file_url?'查看文件':'在原对话查看文件');a.href=url;a.target='_blank';a.rel='noopener';details.append(a);}
+    return details;
+  }
   if(t==='portable-image'){
     const img=make('img');const data=component?.images?.[0];img.src=host.bundle.portableImages?.[p.__resolutionId]||safeUrl(data?.thumbnail_url||data?.content_url);img.alt=p.alt||data?.title||'图片';img.style.width='100%';img.style.aspectRatio=p.aspectRatio||'4/3';img.style.objectFit='cover';img.tabIndex=0;img.setAttribute('role','button');img.setAttribute('aria-label','预览图片：'+img.alt);const preview=()=>{const full=make('img');full.src=img.src;full.alt=img.alt;dialog(full);};img.onclick=preview;img.onkeydown=e=>{if(e.key==='Enter')preview();};return img;
   }

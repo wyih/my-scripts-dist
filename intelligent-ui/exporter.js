@@ -1,11 +1,13 @@
-    // Intelligent UI is an opt-in path per reply, detected from ChatGPT's renderer marker.
+    // The DIL renderer also renders ordinary prose. Require a widget or content control.
     const INTELLIGENT_UI_SELECTOR = '[data-dil-message-id]';
     const intelligentUITemplates = new Map();
 
     function getIntelligentUIRoots(turn) {
         if (!turn || getRoleFromWrapper(turn) === 'user' || turn.getAttribute('data-privacy-skip') === 'true') return [];
         return [...(turn.matches(INTELLIGENT_UI_SELECTOR) ? [turn] : []), ...turn.querySelectorAll(INTELLIGENT_UI_SELECTOR)]
-            .filter(root => root.getAttribute('data-dil-message-id')?.trim() && !root.parentElement?.closest(INTELLIGENT_UI_SELECTOR));
+            .filter(root => root.getAttribute('data-dil-message-id')?.trim() && !root.parentElement?.closest(INTELLIGENT_UI_SELECTOR))
+            .filter(root => [...root.querySelectorAll('form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"], [data-d-component="svg"], .recharts-wrapper, .mermaid, .leaflet-container, [data-widget-share-button], canvas, iframe')]
+                .some(node => !node.closest('pre, [data-code-block="true"], [data-markdown-copy="code-block"], [data-markdown-copy="exclude"], [data-d-component="popover-trigger"]') && !isIgnorableChatGPTFileReference(node)));
     }
 
     function intelligentUIBundle(message, messageId, conversationUrl) {
@@ -13,7 +15,7 @@
         const metadata = message.metadata;
         const dil = metadata?.model_dil_v2;
         if (!dil || typeof dil.code !== 'string' || !dil.code.trim() || !dil.constants || typeof dil.constants !== 'object') return null;
-        const unsupported = (dil.requiredComponents || []).filter(name => !['Cite', 'Link', 'AsyncImage'].includes(name));
+        const unsupported = (dil.requiredComponents || []).filter(name => !['Cite', 'FileCite', 'Link', 'AsyncImage'].includes(name));
         if (unsupported.length) throw new Error(`尚未支持这些 UI 组件：${unsupported.join('、')}`);
         if (metadata.is_complete === false || message.status === 'in_progress') throw new Error('回答仍在生成，请完成后再导出');
         return JSON.parse(JSON.stringify({
@@ -123,7 +125,7 @@
 
     async function getIntelligentUITemplate(bundle) {
         const full = bundle.contentReferences.some(ref => ref?.data?.language === 'mermaid' && !/^\s*(?:flowchart|graph)\b/.test(ref.data.content || ''));
-        const name = full ? 'runtime-v1-full.html' : 'runtime-v1.html';
+        const name = full ? 'runtime-v2-full.html' : 'runtime-v2.html';
         if (!intelligentUITemplates.has(name)) {
             // Versioned filenames also key the persistent cache; bump them when runtime assets change.
             const cacheKey = `cgpt_ui_runtime:${name}`;
@@ -171,7 +173,7 @@
     }
 
     async function buildIntelligentUIHTML(bundle, template) {
-        const program = `globalThis.PortableProgram=function(DIL,__dil,Cite,Link,AsyncImage,GenUI,Date){\n${bundle.code}\n};`;
+        const program = `globalThis.PortableProgram=function(DIL,__dil,Cite,Link,AsyncImage,GenUI,Date,FileCite){\n${bundle.code}\n};`;
         const data = { ...bundle, code: '/* Program embedded at export time. */' };
         const compressed = await new Response(new Blob([JSON.stringify(data)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
         return template.replace('/*__CGPT_UI_PROGRAM__*/', () => program.replace(/<\/script/gi, '<\\/script'))

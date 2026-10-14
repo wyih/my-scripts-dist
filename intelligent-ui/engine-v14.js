@@ -4,6 +4,6 @@ ${g}`));e.trace("DILRenderer.evaluateJS",()=>k(...Object.values(_)))},dispose(){
 return {${l.join(",")}};`}trace(e,t){return this.options.trace?this.options.trace(e,t):t()}restoreSource(){const e=this.lastSource;e!==void 0&&this.trace("restore_source",()=>this.runtime.updateSource(e))}}function Oe(o){return{activeBreakpoints:[],appData:{},constants:{},isMobile:!1,theme:"light",...o}}function mt(o){if(!/^[A-Za-z_$][0-9A-Za-z_$]*$/.test(o))throw new Error(`Invalid DIL global name "${o}"`)}globalThis.PortableDIL={Runner:class extends sr {
 createSourceEvaluator(e){
 const jsx=this.wrapJsxRuntime(e.jsxRuntimeFacade),dil=this.wrapDilRuntime(e.runtimeApiFacade);
-const Cite=p=>jsx.jsx('portable-cite',p),Link=p=>jsx.jsx('portable-link',p),AsyncImage=p=>jsx.jsx('portable-image',p);
-return {beginRender(){},evaluate:()=>globalThis.PortableProgram(dil,jsx,Cite,Link,AsyncImage,this.globals.GenUI,e.dateConstructor),dispose(){}};
+const Cite=p=>jsx.jsx('portable-cite',p),Link=p=>jsx.jsx('portable-link',p),AsyncImage=p=>jsx.jsx('portable-image',p),FileCite=p=>jsx.jsx('portable-file-cite',p);
+return {beginRender(){},evaluate:()=>globalThis.PortableProgram(dil,jsx,Cite,Link,AsyncImage,this.globals.GenUI,e.dateConstructor,FileCite),dispose(){}};
 }},apply:Ht().applyDILRenderOperations};})();

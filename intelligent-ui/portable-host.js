@@ -7,10 +7,11 @@ class PortableHost {
     this.errors = [];
     this.runner = new PortableDIL.Runner(bundle.code, {
       data: {constants: bundle.constants, appData: bundle.appData},
-      // These three host widgets resolve to generic native elements. Their surrounding logic is original.
+      // Host widgets resolve to native elements; their surrounding logic is original.
       dilComponents: {
         AsyncImage: '(p)=>__dil.jsx("portable-image",p)',
         Cite: '(p)=>__dil.jsx("portable-cite",p)',
+        FileCite: '(p)=>__dil.jsx("portable-file-cite",p)',
         Link: '(p)=>__dil.jsx("portable-link",p,...(p.children??[]))',
       },
       globals: {GenUI: hostActions},

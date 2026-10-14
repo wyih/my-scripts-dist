@@ -13,7 +13,7 @@ const loader=`    // Local test build: no runtime fetch or unpublished GitHub de
         const full = bundle.contentReferences.some(ref => ref?.data?.language === 'mermaid' && !/^\\s*(?:flowchart|graph)\\b/.test(ref.data.content || ''));
         const name = full ? 'full' : 'flowchart';
         if (!intelligentUITemplates.has(name)) {
-            const payload = full ? '${pack('runtime-v1-full.html')}' : '${pack('runtime-v1.html')}';
+            const payload = full ? '${pack('runtime-v2-full.html')}' : '${pack('runtime-v2.html')}';
             intelligentUITemplates.set(name, new Response(new Blob([Uint8Array.from(atob(payload), c => c.charCodeAt(0))]).stream().pipeThrough(new DecompressionStream('gzip'))).text());
         }
         return intelligentUITemplates.get(name);
