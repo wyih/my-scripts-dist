@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { JSDOM, VirtualConsole } from 'jsdom';
 
 const script = readFileSync(process.env.CHATGPT_EXPORTER_SCRIPT || new URL('../ChatGPT exporter.js', import.meta.url), 'utf8');
+const journalCode = 'Dr Contract Asset                                1,755,000\n    Cr Revenue from Long-Term Contracts                      1,755,000';
+const modernBashCode = '  echo first\n\n    echo second\n';
 // An optional saved page exercises the same assertions against real page markup.
 const savedPage = process.argv[2] ? readFileSync(process.argv[2], 'utf8') : null;
 const modernUser = (index, text) => `
@@ -197,6 +199,15 @@ const sample = `<!doctype html>
         </div>
       </div>
     </pre>
+    <div class="CodeBlock-zu1QM3"><div data-code-block="true" data-markdown-copy="code-block">
+      <div data-markdown-copy="exclude"><div>纯文本</div><div data-code-block-controls="true"><button aria-label="启用自动换行">Wrap</button><button aria-label="复制代码">Copy</button></div></div>
+      <div data-code-block-source="true" class="whitespace-pre"><code class="whitespace-pre! block"><span><span>${journalCode.split('\n').join('</span>\n<span>')}</span></span></code></div>
+    </div></div>
+    <div data-markdown-copy="code-block">
+      <div data-markdown-copy="exclude"><div>Bash</div><button aria-label="复制代码">Copy</button></div>
+      <div data-code-block-source="true"><code><span>${modernBashCode}</span></code></div>
+    </div>
+    <p>Inline <code>contract_asset</code> remains inline.</p>
   </div>
   <div class="z-0 flex min-h-[46px] justify-start">
     <div aria-label="Response actions" class="flex flex-wrap items-center" role="group" tabindex="-1">
@@ -541,6 +552,18 @@ function collectHeadings(blocks) {
     if (plainCode(codeBlocks[4]) !== '会计确认与计量\\n列报与披露\\n监管关注口径') {
       failures.push('codemirror plain text block should preserve visual line breaks');
     }
+    if (codeBlocks.length !== 7 || codeBlocks[5]?.code.language !== 'plain text' || plainCode(codeBlocks[5]) !== ${JSON.stringify(journalCode)}) {
+      failures.push('modern journal entry should export once as a code block with exact newlines and indentation');
+    }
+    if (codeBlocks[6]?.code.language !== 'bash' || plainCode(codeBlocks[6]) !== ${JSON.stringify(modernBashCode)}) {
+      failures.push('modern code wrapper should detect its header language and retain blank lines and outer whitespace');
+    }
+    if (result.allText.includes('纯文本') || result.allText.includes('Wrap')) {
+      failures.push('modern code toolbar should stay out of the exported content');
+    }
+    if (!richTextItems.some(item => item.text?.content === 'contract_asset' && item.annotations?.code)) {
+      failures.push('inline code should retain its inline annotation');
+    }
     if (!result.allText.includes('regulatory salience of accounting implementation issues\\n会计准则实施问题的监管显著性 / 制度化关注度。')) {
       failures.push('blockquote br should preserve inline line break');
     }
@@ -661,6 +684,20 @@ function collectHeadings(blocks) {
     const singlePayload = await waitFor(() => window.__captured[1]);
     if (JSON.stringify(collectMath(singlePayload.children)) !== JSON.stringify(expectedMath)) {
       failures.push('single-answer export should preserve the same equations as full export');
+    }
+
+    document.querySelector('[data-message-author-role="user"] .cgpt-tool-group').remove();
+    await waitFor(() => document.querySelector('[data-message-author-role="user"] [title="一问一答导出"]'));
+    for (const control of [
+      document.querySelector('[data-message-id="dom-message-id-does-not-match-backend"] [title="单条导出"]'),
+      document.querySelector('[data-message-author-role="user"] [title="一问一答导出"]')
+    ]) {
+      const count = window.__captured.length;
+      control.click();
+      const codePayload = await waitFor(() => window.__captured[count]);
+      if (JSON.stringify(codePayload.children.filter(block => block.type === 'code')) !== JSON.stringify(codeBlocks)) {
+        failures.push('single-answer and pair exports should retain the same code blocks as full export');
+      }
     }
 
     document.body.innerHTML = ${JSON.stringify(modernFixture)};

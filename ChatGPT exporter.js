@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.37
+// @version      2.38
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）+Intelligent UI 自动识别导出
 // @author       Wyih
@@ -24,7 +24,7 @@
 
     if (window.top !== window.self) return;
 
-    console.log('[ChatGPT→Notion v2.37] script loaded');
+    console.log('[ChatGPT→Notion v2.38] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -2303,6 +2303,17 @@
                 }
             }
 
+            if (n.nodeType === 1 && n.matches('pre, [data-code-block="true"], [data-markdown-copy="code-block"]')) {
+                flush();
+                const lang = detectLanguageRecursive(n);
+                const fullCode = extractCodeText(n, lang);
+                if (!fullCode.trim()) return;
+                const chunks = splitCodeSafe(fullCode);
+                const rt = chunks.map(c => ({ type: "text", text: { content: c } }));
+                blocks.push({ object: "block", type: "code", code: { rich_text: rt, language: lang } });
+                return;
+            }
+
             if (n.nodeType === 3 || ['B', 'I', 'CODE', 'SPAN', 'A', 'STRONG', 'EM'].includes(n.nodeName)) {
                 if (n.nodeName === 'A' && (n.hasAttribute('download') || n.href.includes('blob:'))) {
                     flush();
@@ -2331,14 +2342,6 @@
                             blocks.push({ object: "block", type: "image", image: { type: "external", external: { url: `${ASSET_PLACEHOLDER_PREFIX}image.png::${n.src}` } } });
                         }
                     }
-                } else if (t === 'PRE') {
-                    flush();
-                    const lang = detectLanguageRecursive(n);
-                    const fullCode = extractCodeText(n, lang);
-                    if (!fullCode.trim()) return;
-                    const chunks = splitCodeSafe(fullCode);
-                    const rt = chunks.map(c => ({ type: "text", text: { content: c } }));
-                    blocks.push({ object: "block", type: "code", code: { rich_text: rt, language: lang } });
                 } else if (/^H[1-6]$/.test(t)) {
                     flush();
                     const rich = parseInlineNodes(n.childNodes);
