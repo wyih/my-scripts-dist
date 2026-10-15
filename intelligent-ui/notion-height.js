@@ -46,8 +46,9 @@ async function resizeNotionIntelligentUIFrame(frame, height) {
     const bounds = handle.getBoundingClientRect();
     const x = bounds.left + bounds.width / 2;
     const y = bounds.top + bounds.height / 2;
+    // Tampermonkey's sandbox window is not a native UIEventInit.view Window.
     const dispatch = (target, type, point, buttons) => target.dispatchEvent(new MouseEvent(type, {
-        bubbles: true, cancelable: true, view: window, button: 0, buttons,
+        bubbles: true, cancelable: true, button: 0, buttons,
         clientX: x, clientY: point,
     }));
     dispatch(handle, 'mousedown', y, 1);

@@ -8,6 +8,13 @@ const dom = new JSDOM('<body><div class="notion-selectable" data-block-id="test"
     + '<div class="notion-block-resizer" style="display:contents"><div style="cursor:row-resize"></div></div></div></body>',
 {url: 'https://app.notion.com/p/test', runScripts: 'outside-only', pretendToBeVisual: true});
 const w = dom.window;
+const NativeMouseEvent = w.MouseEvent;
+w.MouseEvent = class extends NativeMouseEvent {
+    constructor(type, options) {
+        if (options?.view != null) throw new TypeError('Tampermonkey sandbox window is not a native Window');
+        super(type, options);
+    }
+};
 w.eval(source + '\nwindow.heightTest = {installNotionIntelligentUIHeight, resizeNotionIntelligentUIFrame, reportIntelligentUIHeight};');
 const frame = w.document.querySelector('iframe');
 const handle = w.document.querySelector('.notion-block-resizer > div');
@@ -119,4 +126,4 @@ await Promise.race([completed, sleep(2500).then(() => { throw new Error('late UI
 assert.deepEqual(storageReads, ['cgpt_ui_height_' + pageId], 'the Notion branch reads only its pending height record');
 assert.deepEqual(swept, [166, 1175], 'calibrate all UI blocks, including one mounted later');
 sw.close();
-console.log('PASS: height protocol, native resize, canonical page startup, lazy UI traversal, growth/shrink and clamp detection');
+console.log('PASS: height protocol, sandbox mouse events, native resize, canonical page startup, lazy UI traversal, growth/shrink and clamp detection');

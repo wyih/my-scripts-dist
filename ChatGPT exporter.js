@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.41
+// @version      2.42
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）+Intelligent UI 自动识别导出
 // @author       Wyih
@@ -36,7 +36,7 @@
         return;
     }
 
-    console.log('[ChatGPT→Notion v2.41] script loaded');
+    console.log('[ChatGPT→Notion v2.42] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -2497,8 +2497,9 @@ async function resizeNotionIntelligentUIFrame(frame, height) {
     const bounds = handle.getBoundingClientRect();
     const x = bounds.left + bounds.width / 2;
     const y = bounds.top + bounds.height / 2;
+    // Tampermonkey's sandbox window is not a native UIEventInit.view Window.
     const dispatch = (target, type, point, buttons) => target.dispatchEvent(new MouseEvent(type, {
-        bubbles: true, cancelable: true, view: window, button: 0, buttons,
+        bubbles: true, cancelable: true, button: 0, buttons,
         clientX: x, clientY: point,
     }));
     dispatch(handle, 'mousedown', y, 1);
