@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.42
+// @version      2.43
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）+Intelligent UI 自动识别导出
 // @author       Wyih
@@ -36,7 +36,7 @@
         return;
     }
 
-    console.log('[ChatGPT→Notion v2.42] script loaded');
+    console.log('[ChatGPT→Notion v2.43] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -2449,6 +2449,24 @@ function intelligentUIContentSections(root) {
     return sections;
 }
 
+// Only the temporary tab created for this export is closed after calibration.
+function openNotionHeightCalibration(pageId, count) {
+    const pendingKey = 'cgpt_ui_height_' + pageId;
+    GM_setValue(pendingKey, count);
+    const tab = GM_openInTab(`https://app.notion.com/p/${pageId}`, {active: false, insert: true, setParent: true});
+    const started = Date.now();
+    const poll = setInterval(() => {
+        if (GM_getValue(pendingKey, count) === 0) {
+            clearInterval(poll);
+            // Allow Notion's queued native edit to sync before removing its tab.
+            setTimeout(() => tab.close(), 3000);
+        } else if (Date.now() - started > 120000) {
+            clearInterval(poll);
+        }
+    }, 1000);
+    tab.onclose = () => clearInterval(poll);
+}
+
 // HTML reports its rendered content size; the Notion page saves it through its native resizer.
 function reportIntelligentUIHeight() {
     const app = document.getElementById('app');
@@ -2975,8 +2993,7 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
                     const page = JSON.parse(res.responseText);
                     const fitHTML = hasHTML ? () => {
                         const pageId = page.id.replace(/-/g, '');
-                        GM_setValue('cgpt_ui_height_' + pageId, blocks.filter(block => block.embed?.file_upload).length);
-                        GM_openInTab(`https://app.notion.com/p/${pageId}`, {active: false, insert: true, setParent: true});
+                        openNotionHeightCalibration(pageId, blocks.filter(block => block.embed?.file_upload).length);
                     } : undefined;
                     const remaining = hasHTML ? blocks : blocks.slice(NOTION_BLOCK_BATCH_SIZE);
                     if (remaining.length > 0) {

@@ -1,8 +1,46 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import vm from 'node:vm';
 import {JSDOM} from 'jsdom';
 
 const source = fs.readFileSync(new URL('../intelligent-ui/notion-height.js', import.meta.url), 'utf8');
+// A background calibration tab stays open until all heights are saved, then gets
+// a sync grace period. Existing user tabs are never involved.
+let pending, poll, closeAfterSync, delay, stopped = 0, closed = 0, now = 0;
+const temporaryTab = {close() { closed++; }};
+const calibration = {
+    GM_setValue: (key, count) => { assert.equal(key, 'cgpt_ui_height_page'); pending = count; },
+    GM_getValue: () => pending,
+    GM_openInTab: (url, options) => {
+        assert.equal(url, 'https://app.notion.com/p/page');
+        assert.equal(options.active, false);
+        return temporaryTab;
+    },
+    setInterval: (callback, ms) => { assert.equal(ms, 1000); poll = callback; return 1; },
+    clearInterval: id => { assert.equal(id, 1); stopped++; },
+    setTimeout: (callback, ms) => { closeAfterSync = callback; delay = ms; },
+    Date: {now: () => now},
+};
+vm.runInNewContext(source, calibration);
+calibration.openNotionHeightCalibration('page', 2);
+poll();
+assert.equal(stopped, 0, 'keep calibrating while a height is still pending');
+assert.equal(closed, 0);
+pending = 0;
+poll();
+assert.equal(stopped, 1);
+assert.equal(closed, 0, 'do not close before the native edit has had time to sync');
+assert.equal(delay, 3000);
+closeAfterSync();
+assert.equal(closed, 1, 'close the tab returned for this export');
+calibration.openNotionHeightCalibration('page', 2);
+now = 120001;
+poll();
+assert.equal(stopped, 2);
+assert.equal(closed, 1, 'leave an incomplete calibration open for recovery');
+temporaryTab.onclose();
+assert.equal(stopped, 3, 'a user-closed tab stops polling');
+
 const dom = new JSDOM('<body><div class="notion-selectable" data-block-id="test">'
     + 'intelligent-ui-test-section-1.html<iframe></iframe>'
     + '<div class="notion-block-resizer" style="display:contents"><div style="cursor:row-resize"></div></div></div></body>',
@@ -126,4 +164,4 @@ await Promise.race([completed, sleep(2500).then(() => { throw new Error('late UI
 assert.deepEqual(storageReads, ['cgpt_ui_height_' + pageId], 'the Notion branch reads only its pending height record');
 assert.deepEqual(swept, [166, 1175], 'calibrate all UI blocks, including one mounted later');
 sw.close();
-console.log('PASS: height protocol, sandbox mouse events, native resize, canonical page startup, lazy UI traversal, growth/shrink and clamp detection');
+console.log('PASS: temporary tab cleanup, height protocol, sandbox mouse events, native resize, canonical page startup, lazy UI traversal, growth/shrink and clamp detection');

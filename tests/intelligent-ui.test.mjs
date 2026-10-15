@@ -13,7 +13,7 @@ w.setTimeout=w.setInterval=()=>1;
 w.GM_getValue=(_,fallback)=>fallback;
 w.GM_setValue=w.GM_registerMenuCommand=w.GM_addStyle=()=>{};
 const openedTabs=[];
-w.GM_openInTab=(url,options)=>openedTabs.push({url,options});
+w.GM_openInTab=(url,options)=>{const tab={url,options,close(){}};openedTabs.push(tab);return tab;};
 w.console={log(){},warn(){},error(){}};
 w.alert=m=>{throw new Error(m);};
 w.eval(source.replace('setInterval(tryInit, 1500);','window.testUI={'+exports.join(',')+'};'));

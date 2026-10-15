@@ -1,3 +1,21 @@
+// Only the temporary tab created for this export is closed after calibration.
+function openNotionHeightCalibration(pageId, count) {
+    const pendingKey = 'cgpt_ui_height_' + pageId;
+    GM_setValue(pendingKey, count);
+    const tab = GM_openInTab(`https://app.notion.com/p/${pageId}`, {active: false, insert: true, setParent: true});
+    const started = Date.now();
+    const poll = setInterval(() => {
+        if (GM_getValue(pendingKey, count) === 0) {
+            clearInterval(poll);
+            // Allow Notion's queued native edit to sync before removing its tab.
+            setTimeout(() => tab.close(), 3000);
+        } else if (Date.now() - started > 120000) {
+            clearInterval(poll);
+        }
+    }, 1000);
+    tab.onclose = () => clearInterval(poll);
+}
+
 // HTML reports its rendered content size; the Notion page saves it through its native resizer.
 function reportIntelligentUIHeight() {
     const app = document.getElementById('app');
