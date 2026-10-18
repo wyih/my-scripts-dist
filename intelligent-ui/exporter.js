@@ -1,4 +1,4 @@
-    // The DIL renderer also renders ordinary prose. Require a widget or content control.
+    // The DIL renderer also renders ordinary prose. Require a visual layout or content control.
     const INTELLIGENT_UI_SELECTOR = '[data-dil-message-id]';
     const intelligentUITemplates = new Map();
 
@@ -6,8 +6,9 @@
         if (!turn || getRoleFromWrapper(turn) === 'user' || turn.getAttribute('data-privacy-skip') === 'true') return [];
         return [...(turn.matches(INTELLIGENT_UI_SELECTOR) ? [turn] : []), ...turn.querySelectorAll(INTELLIGENT_UI_SELECTOR)]
             .filter(root => root.getAttribute('data-dil-message-id')?.trim() && !root.parentElement?.closest(INTELLIGENT_UI_SELECTOR))
-            .filter(root => [...root.querySelectorAll('form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"], [data-d-component="svg"], [data-d-component="row"], [data-d-component="grid"], .recharts-wrapper, .mermaid, .leaflet-container, [data-widget-share-button], canvas, iframe')]
-                .some(node => !node.closest('pre, [data-code-block="true"], [data-markdown-copy="code-block"], [data-markdown-copy="exclude"], [data-d-component="popover-trigger"]') && !isIgnorableChatGPTFileReference(node)));
+            .filter(root => [...root.querySelectorAll('form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"], [data-d-component="svg"], [data-d-component="icon"], [data-d-component="row"], [data-d-component="grid"], [data-d-component="box"], .recharts-wrapper, .mermaid, .leaflet-container, [data-widget-share-button], canvas, iframe')]
+                .some(node => (node.getAttribute('data-d-component') !== 'box' || node.hasAttribute('data-d-has-border') || /(?:^|;)\s*(?:border(?:-[\w-]+)?|background(?:-[\w-]+)?|padding(?:-[\w-]+)?)\s*:/.test(node.getAttribute('style') || ''))
+                    && !node.closest('pre, [data-code-block="true"], [data-markdown-copy="code-block"], [data-markdown-copy="exclude"], [data-d-component="popover-trigger"]') && !isIgnorableChatGPTFileReference(node)));
     }
 
     function splitIntelligentUIRoot(root, original) {
@@ -140,7 +141,7 @@
 
     async function getIntelligentUITemplate(bundle) {
         const full = bundle.contentReferences.some(ref => ref?.data?.language === 'mermaid' && !/^\s*(?:flowchart|graph)\b/.test(ref.data.content || ''));
-        const name = full ? 'runtime-v3-full.html' : 'runtime-v3.html';
+        const name = full ? 'runtime-v4-full.html' : 'runtime-v4.html';
         if (!intelligentUITemplates.has(name)) {
             // Versioned filenames also key the persistent cache; bump them when runtime assets change.
             const cacheKey = `cgpt_ui_runtime:${name}`;

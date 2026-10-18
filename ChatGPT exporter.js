@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.43
+// @version      2.44
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）+Intelligent UI 自动识别导出
 // @author       Wyih
@@ -36,7 +36,7 @@
         return;
     }
 
-    console.log('[ChatGPT→Notion v2.43] script loaded');
+    console.log('[ChatGPT→Notion v2.44] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -2428,7 +2428,7 @@ function intelligentUIContentSections(root) {
         if (node.nodeType !== 1) return true;
         if (node.matches('[data-code-block="true"], [data-markdown-copy="code-block"]')) return true;
         const type = node.getAttribute('data-d-component') || node.tagName.toLowerCase();
-        if (!['text','title','caption','table','divider','math','code','blockquote','p','h1','h2','h3','h4','h5','h6','pre','hr','ul','ol'].includes(type)) return false;
+        if (!['text','title','caption','table','list','divider','math','code','blockquote','p','h1','h2','h3','h4','h5','h6','pre','hr','ul','ol'].includes(type)) return false;
         return ![...(node.matches(controls) ? [node] : []), ...node.querySelectorAll(controls)]
             .some(control => !control.closest('[data-d-component="popover-trigger"], [data-markdown-copy="exclude"], pre, [data-code-block="true"]'));
     };
@@ -2621,7 +2621,7 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
     }
 }
 
-    // The DIL renderer also renders ordinary prose. Require a widget or content control.
+    // The DIL renderer also renders ordinary prose. Require a visual layout or content control.
     const INTELLIGENT_UI_SELECTOR = '[data-dil-message-id]';
     const intelligentUITemplates = new Map();
 
@@ -2629,8 +2629,9 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
         if (!turn || getRoleFromWrapper(turn) === 'user' || turn.getAttribute('data-privacy-skip') === 'true') return [];
         return [...(turn.matches(INTELLIGENT_UI_SELECTOR) ? [turn] : []), ...turn.querySelectorAll(INTELLIGENT_UI_SELECTOR)]
             .filter(root => root.getAttribute('data-dil-message-id')?.trim() && !root.parentElement?.closest(INTELLIGENT_UI_SELECTOR))
-            .filter(root => [...root.querySelectorAll('form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"], [data-d-component="svg"], [data-d-component="row"], [data-d-component="grid"], .recharts-wrapper, .mermaid, .leaflet-container, [data-widget-share-button], canvas, iframe')]
-                .some(node => !node.closest('pre, [data-code-block="true"], [data-markdown-copy="code-block"], [data-markdown-copy="exclude"], [data-d-component="popover-trigger"]') && !isIgnorableChatGPTFileReference(node)));
+            .filter(root => [...root.querySelectorAll('form, input, select, textarea, button, [role="slider"], [role="checkbox"], [role="radio"], [role="tab"], [data-d-component="carousel"], [data-d-component="segmented-control"], [data-d-component="svg"], [data-d-component="icon"], [data-d-component="row"], [data-d-component="grid"], [data-d-component="box"], .recharts-wrapper, .mermaid, .leaflet-container, [data-widget-share-button], canvas, iframe')]
+                .some(node => (node.getAttribute('data-d-component') !== 'box' || node.hasAttribute('data-d-has-border') || /(?:^|;)\s*(?:border(?:-[\w-]+)?|background(?:-[\w-]+)?|padding(?:-[\w-]+)?)\s*:/.test(node.getAttribute('style') || ''))
+                    && !node.closest('pre, [data-code-block="true"], [data-markdown-copy="code-block"], [data-markdown-copy="exclude"], [data-d-component="popover-trigger"]') && !isIgnorableChatGPTFileReference(node)));
     }
 
     function splitIntelligentUIRoot(root, original) {
@@ -2763,7 +2764,7 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
 
     async function getIntelligentUITemplate(bundle) {
         const full = bundle.contentReferences.some(ref => ref?.data?.language === 'mermaid' && !/^\s*(?:flowchart|graph)\b/.test(ref.data.content || ''));
-        const name = full ? 'runtime-v3-full.html' : 'runtime-v3.html';
+        const name = full ? 'runtime-v4-full.html' : 'runtime-v4.html';
         if (!intelligentUITemplates.has(name)) {
             // Versioned filenames also key the persistent cache; bump them when runtime assets change.
             const cacheKey = `cgpt_ui_runtime:${name}`;

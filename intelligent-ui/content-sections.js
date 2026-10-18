@@ -6,7 +6,7 @@ function intelligentUIContentSections(root) {
         if (node.nodeType !== 1) return true;
         if (node.matches('[data-code-block="true"], [data-markdown-copy="code-block"]')) return true;
         const type = node.getAttribute('data-d-component') || node.tagName.toLowerCase();
-        if (!['text','title','caption','table','divider','math','code','blockquote','p','h1','h2','h3','h4','h5','h6','pre','hr','ul','ol'].includes(type)) return false;
+        if (!['text','title','caption','table','list','divider','math','code','blockquote','p','h1','h2','h3','h4','h5','h6','pre','hr','ul','ol'].includes(type)) return false;
         return ![...(node.matches(controls) ? [node] : []), ...node.querySelectorAll(controls)]
             .some(control => !control.closest('[data-d-component="popover-trigger"], [data-markdown-copy="exclude"], pre, [data-code-block="true"]'));
     };
