@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.45
+// @version      2.46
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）+Intelligent UI 自动识别导出
 // @author       Wyih
@@ -36,7 +36,7 @@
         return;
     }
 
-    console.log('[ChatGPT→Notion v2.45] script loaded');
+    console.log('[ChatGPT→Notion v2.46] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -640,7 +640,12 @@
         return null;
     }
 
+    function copiedMermaidSource(node) {
+        return mermaidSources(node.getAttribute('data-markdown-copy-text') || '')[0];
+    }
+
     function detectLanguageRecursive(preNode) {
+        if (copiedMermaidSource(preNode) !== undefined) return 'mermaid';
         const code = preNode.querySelector('code');
         const cmContent = findCodeMirrorContent(preNode);
         const className = code?.className || '';
@@ -692,6 +697,8 @@
     }
 
     function extractCodeText(preNode, language) {
+        const copied = copiedMermaidSource(preNode);
+        if (copied !== undefined) return copied;
         const cmContent = findCodeMirrorContent(preNode);
         if (cmContent) return readCodeMirrorText(cmContent);
 
@@ -2973,7 +2980,7 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
                 .filter(node => node.matches(MERMAID_PREVIEW_SELECTOR) || detectLanguageRecursive(node) === 'mermaid');
             const diagrams = candidates.filter(node => !candidates.some(parent => parent !== node && parent.contains(node)));
             diagrams.forEach((node, index) => {
-                if (node.matches(MERMAID_PREVIEW_SELECTOR) || node.querySelector(MERMAID_PREVIEW_SELECTOR)) {
+                if (copiedMermaidSource(node) === undefined && (node.matches(MERMAID_PREVIEW_SELECTOR) || node.querySelector(MERMAID_PREVIEW_SELECTOR))) {
                     node._cgptMermaid = { turn, messageId: getTurnMessageId(turn), index, count: diagrams.length };
                 }
             });

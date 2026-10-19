@@ -68,5 +68,26 @@ assert.equal(result.filter(b=>b.paragraph?.rich_text.some(t=>t.text.content.star
 assert(!JSON.stringify(result).includes('fill:red'));
 turn.setAttribute('data-privacy-skip','true');
 assert(!api.getChatBlocks([turn]).some(b=>b._cgptMermaid));
+
+// A fresh page lazily mounts the diagram only after scrolling to it. Its copy
+// metadata already holds the entire fenced source while the preview DOM is absent.
+const cold = w.document.createElement('div');
+cold.dataset.messageAuthorRole = 'assistant';
+cold.innerHTML = '<p>加载前文</p><div data-markdown-copy="code-block"><div role="status" aria-label="正在加载 Mermaid 图表"></div></div><p>加载后文</p>';
+cold.querySelector('[data-markdown-copy]').setAttribute('data-markdown-copy-text', '```mermaid\n'+code+'\n```');
+w.fetch = () => {throw new Error('copy metadata must work before rendering without network');};
+const coldBlocks = await api.processMermaid(api.getChatBlocks([cold]));
+assert.equal(coldBlocks.filter(b=>b.code?.language==='mermaid').length, 1);
+assert.equal(coldBlocks.find(b=>b.type==='code').code.rich_text.map(t=>t.text.content).join(''), code);
+assert.deepEqual(Array.from(coldBlocks.filter(b=>b.type==='paragraph'),b=>b.paragraph.rich_text.map(t=>t.text.content).join('')), ['加载前文','加载后文']);
+assert(!coldBlocks.some(b=>b._cgptMermaid || b._cgptIntelligentUI));
+
+// A loading diagram and a rendered diagram in the same reply retain their order.
+turn.removeAttribute('data-privacy-skip');
+const firstPreview = turn.querySelector('[data-chatgpt-mermaid-preview]');
+firstPreview.replaceWith(cold.querySelector('[data-markdown-copy]').cloneNode(true));
+turn.__reactFiber$test = {memoizedProps:{message}};
+result = await api.processMermaid(api.getChatBlocks([turn]));
+assert.deepEqual(Array.from(result.filter(b=>b.type==='code'),b=>b.code.rich_text.map(t=>t.text.content).join('')), [code,second,code]);
 dom.window.close();
-console.log('PASS: native Mermaid source, ordered mixed blocks, shared React/API/HTML extraction, explicit failure and privacy');
+console.log('PASS: native Mermaid source before/after lazy rendering, ordered mixed blocks, shared React/API/HTML extraction, explicit failure and privacy');
