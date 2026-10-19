@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.44
+// @version      2.45
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）+Intelligent UI 自动识别导出
 // @author       Wyih
@@ -36,7 +36,7 @@
         return;
     }
 
-    console.log('[ChatGPT→Notion v2.44] script loaded');
+    console.log('[ChatGPT→Notion v2.45] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -2289,8 +2289,9 @@
 
         Array.from(nodes).forEach(n => {
             if (n._cgptIntelligentUI) { flush(); blocks.push({ _cgptIntelligentUI: n._cgptIntelligentUI }); return; }
+            if (n._cgptMermaid) { flush(); blocks.push({ _cgptMermaid: n._cgptMermaid }); return; }
             if (n.getAttribute?.('data-d-component') === 'divider') { flush(); blocks.push({ object: 'block', type: 'divider', divider: {} }); return; }
-            if (['SCRIPT', 'STYLE', 'SVG'].includes(n.nodeName)) return;
+            if (['SCRIPT', 'STYLE'].includes(n.nodeName) || n.namespaceURI === 'http://www.w3.org/2000/svg') return;
             if (shouldSkipChatGPTPureControlNode(n)) return;
             if (n.nodeType === 1 && isIgnorableChatGPTFileReference(n)) return;
 
@@ -2666,12 +2667,12 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
         }));
     }
 
-    function intelligentUIMessageFromReact(root, messageId) {
+    function intelligentUIMessageFromReact(root, messageId, requireUI = true) {
         const seen = new Set();
         function find(value, depth) {
             if (!value || typeof value !== 'object' || seen.has(value) || depth > 5) return null;
             seen.add(value);
-            if (value.id === messageId && value.metadata?.model_dil_v2) return value;
+            if (value.id === messageId && (!requireUI || value.metadata?.model_dil_v2)) return value;
             for (const key of ['message', 'messages', 'node', 'data', 'value', 'props', 'children']) {
                 const child = value[key];
                 if (!child || typeof child !== 'object') continue;
@@ -2692,7 +2693,7 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
 
     // React Router streams use one reference table shared across newline-delimited chunks.
     // Parse the JSON string literals; never execute page scripts or the exported program here.
-    function intelligentUIMessageFromHTML(html, messageId) {
+    function intelligentUIMessageFromHTML(html, messageId, requireUI = true) {
         let stream = '';
         for (const match of html.matchAll(/\.streamController\.enqueue\(("(?:\\.|[^"\\])*")\)/g)) {
             stream += JSON.parse(match[1]);
@@ -2724,7 +2725,7 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
             const idKey = Object.keys(item).find(key => flat[Number(key.slice(1))] === 'id');
             if (idKey && flat[item[idKey]] === messageId) {
                 const message = decode(i);
-                if (message.metadata?.model_dil_v2) return message;
+                if (!requireUI || message.metadata?.model_dil_v2) return message;
             }
         }
         return null;
@@ -2869,6 +2870,72 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
     // END INTELLIGENT UI
 
     // ------------------- 6. 导出 -------------------
+    const MERMAID_PREVIEW_SELECTOR = '[data-chatgpt-mermaid-preview], [data-code-block-preview-pane="mermaid"]';
+
+    function mermaidSources(markdown) {
+        const sources = [];
+        let fence, lines = [];
+        for (const line of markdown.split(/\r?\n/)) {
+            const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+            if (!fence) {
+                if (match) {
+                    fence = { marker: match[1], mermaid: /^\s*mermaid\s*$/i.test(match[2]) };
+                    lines = [];
+                }
+            } else if (match && match[1][0] === fence.marker[0] && match[1].length >= fence.marker.length && !match[2].trim()) {
+                if (fence.mermaid) sources.push(lines.join('\n'));
+                fence = null;
+            } else {
+                lines.push(line);
+            }
+        }
+        return sources;
+    }
+
+    async function processMermaid(blocks) {
+        if (!blocks.some(block => block._cgptMermaid)) return blocks;
+        const messages = new Map(), context = {}, output = [];
+        const fromMessage = message => mermaidSources(collectStringLeaves(message?.content, []).join('\n'));
+        async function readSources({ turn, messageId, count }) {
+            let message = intelligentUIMessageFromReact(turn, messageId, false);
+            if (!message) {
+                context.conversation ||= fetchChatGPTConversationJson();
+                const json = await context.conversation;
+                message = getConversationMessageForTurn(json, turn, getConversationAssistantMessages(json));
+            }
+            let sources = fromMessage(message);
+            if (sources.length !== count) {
+                message = intelligentUIMessageFromHTML(document.documentElement.innerHTML, messageId, false);
+                sources = fromMessage(message);
+            }
+            if (sources.length !== count) {
+                context.html ||= fetch(location.origin + location.pathname, { credentials: 'include' }).then(response => {
+                    if (!response.ok) throw new Error(`读取原回答失败（HTTP ${response.status}）`);
+                    return response.text();
+                });
+                message = intelligentUIMessageFromHTML(await context.html, messageId, false);
+                sources = fromMessage(message);
+            }
+            if (sources.length !== count || sources.some(source => !source.trim())) throw new Error('未找到与图表对应的完整 Mermaid 源码，请刷新 ChatGPT 后重试');
+            return sources;
+        }
+        for (const block of blocks) {
+            const descriptor = block._cgptMermaid;
+            if (!descriptor) { output.push(block); continue; }
+            try {
+                if (!messages.has(descriptor.turn)) messages.set(descriptor.turn, readSources(descriptor));
+                const sources = await messages.get(descriptor.turn);
+                output.push({ object: 'block', type: 'code', code: {
+                    language: 'mermaid', rich_text: splitCodeSafe(sources[descriptor.index]).map(content => ({ type: 'text', text: { content } })),
+                } });
+            } catch (error) {
+                console.warn('[ChatGPT→Notion] Mermaid export failed:', error.message);
+                output.push(intelligentUINotice(`Mermaid 未完成导出：${error.message}`));
+            }
+        }
+        return output;
+    }
+
     function getChatBlocks(targetTurns = null) {
         let turnsToProcess;
         if (targetTurns) {
@@ -2902,6 +2969,14 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
 
             const clone = turn.cloneNode(true);
             removeChatGPTExportChrome(clone);
+            const candidates = [...clone.querySelectorAll(`${MERMAID_PREVIEW_SELECTOR}, pre, [data-code-block="true"], [data-markdown-copy="code-block"]`)]
+                .filter(node => node.matches(MERMAID_PREVIEW_SELECTOR) || detectLanguageRecursive(node) === 'mermaid');
+            const diagrams = candidates.filter(node => !candidates.some(parent => parent !== node && parent.contains(node)));
+            diagrams.forEach((node, index) => {
+                if (node.matches(MERMAID_PREVIEW_SELECTOR) || node.querySelector(MERMAID_PREVIEW_SELECTOR)) {
+                    node._cgptMermaid = { turn, messageId: getTurnMessageId(turn), index, count: diagrams.length };
+                }
+            });
 
             const attachments = collectDownloadedAttachments(turn);
             if (attachments.length) {
@@ -3037,6 +3112,7 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
         } else updateStatus('Processing...');
 
         try {
+            blocks = await processMermaid(blocks);
             blocks = await processIntelligentUI(blocks, token, updateStatus);
             blocks = await processDownloadedAttachments(blocks, token, updateStatus);
             blocks = await processAssets(blocks, updateStatus);

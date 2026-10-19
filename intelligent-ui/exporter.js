@@ -43,12 +43,12 @@
         }));
     }
 
-    function intelligentUIMessageFromReact(root, messageId) {
+    function intelligentUIMessageFromReact(root, messageId, requireUI = true) {
         const seen = new Set();
         function find(value, depth) {
             if (!value || typeof value !== 'object' || seen.has(value) || depth > 5) return null;
             seen.add(value);
-            if (value.id === messageId && value.metadata?.model_dil_v2) return value;
+            if (value.id === messageId && (!requireUI || value.metadata?.model_dil_v2)) return value;
             for (const key of ['message', 'messages', 'node', 'data', 'value', 'props', 'children']) {
                 const child = value[key];
                 if (!child || typeof child !== 'object') continue;
@@ -69,7 +69,7 @@
 
     // React Router streams use one reference table shared across newline-delimited chunks.
     // Parse the JSON string literals; never execute page scripts or the exported program here.
-    function intelligentUIMessageFromHTML(html, messageId) {
+    function intelligentUIMessageFromHTML(html, messageId, requireUI = true) {
         let stream = '';
         for (const match of html.matchAll(/\.streamController\.enqueue\(("(?:\\.|[^"\\])*")\)/g)) {
             stream += JSON.parse(match[1]);
@@ -101,7 +101,7 @@
             const idKey = Object.keys(item).find(key => flat[Number(key.slice(1))] === 'id');
             if (idKey && flat[item[idKey]] === messageId) {
                 const message = decode(i);
-                if (message.metadata?.model_dil_v2) return message;
+                if (!requireUI || message.metadata?.model_dil_v2) return message;
             }
         }
         return null;
