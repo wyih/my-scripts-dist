@@ -8,11 +8,13 @@ import json
 import os
 import re
 import secrets
+import ssl
 import stat
 import threading
 import time
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from http.client import IncompleteRead, RemoteDisconnected
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Literal
@@ -31,6 +33,7 @@ class Download:
     filename: str
     downloaded_after: float | None = None
     require_new_download: bool = False
+    local_file: dict | None = None
 
     @classmethod
     def parse(cls, value: object) -> Download:
@@ -47,7 +50,14 @@ class Download:
         fresh = value.get('require_new_download', False)
         if type(fresh) is not bool or (fresh and after is None):
             raise ValueError('新下载标记无效')
-        return cls(filename, after, fresh)
+        local_file = value.get('local_file')
+        if local_file is not None:
+            if (not isinstance(local_file, dict) or type(local_file.get('size_bytes')) is not int
+                    or local_file['size_bytes'] < 0 or not isinstance(local_file.get('mtime_ns'), str)
+                    or not re.fullmatch(r'\d{1,24}', local_file['mtime_ns'])):
+                raise ValueError('本地下载记录无效')
+            cls.parse({'filename': local_file.get('filename')})
+        return cls(filename, after, fresh, local_file)
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,7 @@ class UploadResult:
     file_upload_id: str = ''
     size_bytes: int = 0
     limit_bytes: int = 0
+    local_file: dict | None = None
 
 
 class AttachmentHelper:
@@ -67,11 +78,23 @@ class AttachmentHelper:
         self._api_lock = threading.Lock()
         self._next_request = 0.0
 
-    def _find_download(self, download: Download) -> Path | None:
+    def _find_download(self, download: Download, wait_seconds: float | None = None) -> Path | None:
         normalized = unicodedata.normalize('NFC', download.filename)
         stem, extension = os.path.splitext(normalized)
         pattern = re.compile(re.escape(stem) + r'(?: \((\d+)\))?' + re.escape(extension) + r'$')
-        deadline = time.monotonic() + self.wait_seconds
+        if download.local_file is not None:
+            path = self.downloads / download.local_file['filename']
+            if not pattern.fullmatch(unicodedata.normalize('NFC', path.name)):
+                return None
+            try:
+                info = path.lstat()
+                if (stat.S_ISREG(info.st_mode) and info.st_size == download.local_file['size_bytes']
+                        and str(info.st_mtime_ns) == download.local_file['mtime_ns']):
+                    return path
+            except FileNotFoundError:
+                pass
+            return None
+        deadline = time.monotonic() + (self.wait_seconds if wait_seconds is None else wait_seconds)
         while True:
             matches = []
             partial = False
@@ -95,20 +118,44 @@ class AttachmentHelper:
                 return None
             time.sleep(0.25)
 
+    @staticmethod
+    def _local_file(path: Path) -> dict:
+        info = path.stat()
+        return {'filename': path.name, 'size_bytes': info.st_size, 'mtime_ns': str(info.st_mtime_ns)}
+
+    def check_files(self, downloads: list[Download]) -> list[dict]:
+        results = []
+        for download in downloads:
+            # Only reuse a download tied to this answer, not an unrelated same-name file.
+            local_file = None
+            try:
+                path = self._find_download(download, wait_seconds=0) if download.local_file or download.downloaded_after is not None else None
+                local_file = self._local_file(path) if path else None
+            except FileNotFoundError:
+                pass
+            results.append({'filename': download.filename, 'local_file': local_file})
+        return results
+
     def _notion_request(self, token: str, method: str, path: str,
-                        data: dict | bytes | None = None, content_type: str = 'application/json') -> dict:
+                        data: dict | bytes | None = None, content_type: str = 'application/json',
+                        *, deadline: float | None = None) -> dict:
         body = json.dumps(data, ensure_ascii=False).encode('utf-8') if isinstance(data, dict) else data
         request = Request(NOTION_API + path, data=body, method=method, headers={
             'Authorization': f'Bearer {token}', 'Notion-Version': NOTION_VERSION,
             'Content-Type': content_type,
         })
-        # This service and the page writer run in sequence; space file API calls.
-        with self._api_lock:
-            time.sleep(max(0, self._next_request - time.monotonic()))
-            self._next_request = time.monotonic() + 0.35
+        deadline = deadline if deadline is not None else time.monotonic() + 45
+        for attempt in range(3):
             try:
-                with urlopen(request, timeout=45) as response:
-                    return json.load(response)
+                # Retries share the original time budget and API rate limit.
+                with self._api_lock:
+                    time.sleep(max(0, self._next_request - time.monotonic()))
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('Notion 请求超时')
+                    self._next_request = time.monotonic() + 0.35
+                    with urlopen(request, timeout=remaining) as response:
+                        return json.load(response)
             except HTTPError as error:
                 try:
                     message = json.loads(error.read()).get('message', '')
@@ -117,8 +164,19 @@ class AttachmentHelper:
                 finally:
                     error.close()
                 raise RuntimeError(f'Notion API {error.code}：{message or error.reason}') from error
-            except URLError as error:
-                raise RuntimeError(f'Notion 网络请求失败：{error.reason}') from error
+            except (URLError, OSError, IncompleteRead) as error:
+                reason = error.reason if isinstance(error, URLError) else error
+                transient = isinstance(reason, (ssl.SSLEOFError, ConnectionError, TimeoutError,
+                                                RemoteDisconnected, IncompleteRead))
+                delay = attempt + 1
+                if not transient or attempt == 2 or deadline - time.monotonic() <= delay:
+                    raise RuntimeError(f'Notion 网络请求失败：{reason}') from error
+                time.sleep(delay)
+                # A lost response can follow a successful upload; check before resending.
+                if method == 'POST' and path.endswith('/send'):
+                    status = self._notion_request(token, 'GET', path[:-5], deadline=deadline)
+                    if status.get('status') == 'uploaded':
+                        return status
 
     def _upload(self, download: Download, token: str, limit: int) -> UploadResult:
         path = self._find_download(download)
@@ -129,6 +187,9 @@ class AttachmentHelper:
         selected = path.lstat()
         if not stat.S_ISREG(selected.st_mode):
             return UploadResult(download.filename, 'skipped', '该下载不是普通文件')
+        if download.local_file and (selected.st_size != download.local_file['size_bytes']
+                                    or str(selected.st_mtime_ns) != download.local_file['mtime_ns']):
+            return UploadResult(download.filename, 'skipped', '下载文件已改变，请重新导出')
         flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
         with os.fdopen(os.open(path, flags), 'rb') as source:
             before = os.fstat(source.fileno())
@@ -159,21 +220,25 @@ class AttachmentHelper:
         return UploadResult(download.filename, 'uploaded', file_upload_id=upload_id, size_bytes=len(content), limit_bytes=limit)
 
     def upload_files(self, downloads: list[Download], token: str) -> list[UploadResult]:
-        if not downloads:
-            return []
-        try:
-            user = self._notion_request(token, 'GET', '/users/me')
-            workspace_limit = user.get('bot', {}).get('workspace_limits', {}).get('max_file_upload_size_in_bytes')
-            # Older/scoped token responses can omit limits; use the free-plan cap.
-            limit = min(SINGLE_PART_LIMIT, workspace_limit if type(workspace_limit) is int and workspace_limit > 0 else 5 * MIB)
-        except (RuntimeError, OSError, ValueError) as error:
-            return [UploadResult(item.filename, 'error', str(error)) for item in downloads]
+        limit = None
         results = []
         for download in downloads:
+            local_file = None
             try:
-                results.append(self._upload(download, token, limit))
+                path = self._find_download(download)
+                if path is None:
+                    results.append(UploadResult(download.filename, 'skipped', '未找到已完成的下载，请检查浏览器下载状态及下载目录后重试', limit_bytes=limit or 0))
+                    continue
+                local_file = self._local_file(path)
+                if limit is None:
+                    user = self._notion_request(token, 'GET', '/users/me')
+                    workspace_limit = user.get('bot', {}).get('workspace_limits', {}).get('max_file_upload_size_in_bytes')
+                    # Older/scoped token responses can omit limits; use the free-plan cap.
+                    limit = min(SINGLE_PART_LIMIT, workspace_limit if type(workspace_limit) is int and workspace_limit > 0 else 5 * MIB)
+                result = self._upload(replace(download, local_file=local_file), token, limit)
             except (RuntimeError, OSError, ValueError, KeyError) as error:
-                results.append(UploadResult(download.filename, 'error', str(error), limit_bytes=limit))
+                result = UploadResult(download.filename, 'error', str(error), limit_bytes=limit or 0)
+            results.append(replace(result, local_file=local_file))
         return results
 
 
@@ -194,7 +259,7 @@ def make_server(helper: AttachmentHelper, key: str, port: int = 36678) -> Thread
 
         def do_GET(self) -> None:
             if self.path == '/health':
-                self.respond(200, {'service': 'chatgpt-notion-attachments', 'version': 2})
+                self.respond(200, {'service': 'chatgpt-notion-attachments', 'version': 3})
             else:
                 self.respond(404, {'error': '接口不存在'})
 
@@ -205,7 +270,7 @@ def make_server(helper: AttachmentHelper, key: str, port: int = 36678) -> Thread
             if not hmac.compare_digest(self.headers.get('Authorization', '').encode(), f'Bearer {key}'.encode()):
                 self.respond(401, {'error': '本地附件服务连接密钥不正确'})
                 return
-            if self.path != '/upload':
+            if self.path not in ('/upload', '/check'):
                 self.respond(404, {'error': '接口不存在'})
                 return
             try:
@@ -222,7 +287,10 @@ def make_server(helper: AttachmentHelper, key: str, port: int = 36678) -> Thread
             except (ValueError, UnicodeError) as error:
                 self.respond(400, {'error': str(error)})
                 return
-            self.respond(200, {'results': [asdict(result) for result in helper.upload_files(downloads, token)]})
+            if self.path == '/check':
+                self.respond(200, {'results': helper.check_files(downloads)})
+            else:
+                self.respond(200, {'results': [asdict(result) for result in helper.upload_files(downloads, token)]})
 
     return ThreadingHTTPServer(('127.0.0.1', port), Handler)
 

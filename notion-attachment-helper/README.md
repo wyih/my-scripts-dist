@@ -29,6 +29,8 @@ ChatGPT exporter 2.34 及以上版本的附件自动上传**默认关闭**。只
 
 开启后，直接导出对应回答，脚本自动下载生成文件，等待下载完成后上传到 Notion，并放在对应回答末尾。用户上传文件的引用卡片会从正文中省略，不会触发下载。
 
+ChatGPT exporter 2.47 起先检查同一回答的下载记录。已完成且未变化的本地副本直接上传；上传失败时保留记录，刷新网页后可继续复用。文件被删除或修改时重新下载；不同回答的同名文件分别处理。尚无记录的旧下载首次仍会下载一次，以建立对应关系。
+
 ### 下载目录、停止与更新
 
 默认读取 Mac 的 `~/Downloads`、Windows 的 `%USERPROFILE%\Downloads`。若 Chrome 使用其他下载位置，在辅助程序文件夹内运行：
@@ -51,6 +53,8 @@ Chrome 的「下载前询问保存位置」须关闭，以便自动保存；批�
 
 自动上传上限为 20 MiB 与 Notion 工作区单文件限制中的较小值；免费工作区通常为 5 MiB。超限、下载失败或上传失败时，正文仍会保存，附件位置保留文件名与原因。
 
+接口版本 3 会对 SSL 意外断连、连接重置等临时网络错误最多尝试 3 次，共用原请求的 45 秒时限。上传回执丢失时先查询 Notion；已接收的文件直接使用，尚未接收时再重传。遇到 `UNEXPECTED_EOF_WHILE_READING` 的旧版用户可停止服务、更新辅助程序并重新导出。
+
 ## 直接运行
 
 Mac：
@@ -71,7 +75,7 @@ py -3 helper.py --downloads-dir "%USERPROFILE%\Downloads"
 
 ## 本机接口
 
-`GET /health` 返回服务名称与接口版本；自动下载要求接口版本 2。
+`GET /health` 返回服务名称与接口版本；当前为版本 3，兼容旧版自动下载脚本。ChatGPT exporter 2.47 的下载复用要求接口版本 3。
 
 `POST /upload` 要求 `Authorization: Bearer <连接密钥>`，JSON 内容为：
 
@@ -82,6 +86,8 @@ py -3 helper.py --downloads-dir "%USERPROFILE%\Downloads"
 自动下载请求设置 `require_new_download: true`，只匹配 `downloaded_after` 之后的新文件，等待浏览器完成下载。此标记省略时保留手动下载匹配方式。
 
 返回顺序与请求相同，每项包含 `filename`、`status`（`uploaded` / `skipped` / `error`）、`file_upload_id` 或 `reason`。调用方将成功的 ID 作为 `file_upload` 文件块写入 Notion 页面，位于对应回答正文之后、分隔线之前。
+
+完成下载后，每项还返回 `local_file`（实际 `filename`、`size_bytes`、字符串 `mtime_ns`），上传失败也会返回。脚本按对话和回答保存这份记录。`POST /check` 使用相同的鉴权与请求格式，检查记录对应的本地副本；返回有效的 `local_file` 或 `null`，不访问 Notion。后续 `/upload` 带上 `local_file` 时只读取该副本，先核对文件大小和修改时间。
 
 程序只匹配指定下载目录中的完整文件名及 Chrome 同名编号，不接受路径。文件打开后核对文件身份，再以二进制读取，适用于 Mac 和 Windows。连接密钥保存在用户目录的 `.config/chatgpt-notion-helper/key`；Notion Token 不保存到磁盘。启动输出和请求日志不包含 Notion Token。
 

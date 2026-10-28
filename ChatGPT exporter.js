@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT to Notion Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.46
+// @version      2.47
 // @license      MIT
 // @description  ChatGPT 导出到 Notion：图片归位+隐私开关+单条/问答导出+可选本地附件上传（默认关闭）+Intelligent UI 自动识别导出
 // @author       Wyih
@@ -36,7 +36,7 @@
         return;
     }
 
-    console.log('[ChatGPT→Notion v2.46] script loaded');
+    console.log('[ChatGPT→Notion v2.47] script loaded');
 
     // --- 基础配置 ---
     const PICLIST_URL = "http://127.0.0.1:36677/upload";
@@ -44,7 +44,6 @@
     const MAX_TEXT_LENGTH = 2000;
     const ATTACHMENT_HELPER_URL = 'http://127.0.0.1:36678';
     const DOWNLOAD_FILE_SELECTOR = 'button[aria-label="下载文件"], button[aria-label="Download file"], a[download], a[href^="sandbox:"]';
-    const attachmentDownloadTimes = new Map();
 
     // 🌟 稳定性配置 (平衡速度与稳定性)
     const NOTION_BLOCK_BATCH_SIZE = 90;
@@ -302,7 +301,8 @@
     }
 
     function attachmentKey(turn, filename) {
-        return `${getTurnMessageId(turn)}\u0000${filename}`;
+        const messageId = getTurnMessageId(turn);
+        return messageId ? `attachment_download:${location.pathname}\u0000${messageId}\u0000${filename}` : '';
     }
 
     document.addEventListener('click', event => {
@@ -312,7 +312,8 @@
         const turn = getTurnWrappers().find(node => node.contains(control));
         if (!turn || getRoleFromWrapper(turn) !== 'assistant') return;
         const info = getDownloadFileInfo(control);
-        if (info) attachmentDownloadTimes.set(attachmentKey(turn, info.filename), Date.now() / 1000);
+        const key = info && attachmentKey(turn, info.filename);
+        if (key) GM_setValue(key, { started_at: Date.now() / 1000 });
     }, true);
 
     function collectDownloadedAttachments(turn) {
@@ -320,12 +321,17 @@
         const files = new Map();
         turn.querySelectorAll(DOWNLOAD_FILE_SELECTOR).forEach(control => {
             const info = getDownloadFileInfo(control);
-            if (info) files.set(info.filename, {
+            if (!info) return;
+            const key = attachmentKey(turn, info.filename);
+            const saved = key ? GM_getValue(key, null) : null;
+            files.set(info.filename, {
                 file: {
                     filename: info.filename,
-                    downloaded_after: attachmentDownloadTimes.get(attachmentKey(turn, info.filename)) || null
+                    downloaded_after: saved?.started_at || null,
+                    require_new_download: !!saved?.started_at,
+                    local_file: saved?.local_file || null
                 },
-                control
+                control, key
             });
         });
         return Array.from(files.values());
@@ -362,25 +368,35 @@
             }));
             const health = await requestHelper('GET', '/health');
             if (health.service !== 'chatgpt-notion-attachments') throw new Error('本地附件服务响应不正确');
-            if (health.version < 2) throw new Error('请更新附件辅助程序，以支持自动下载');
+            if (health.version < 3) throw new Error('请更新附件辅助程序，以支持复用已下载的文件');
             results = [];
             for (const [index, entry] of entries.entries()) {
-                statusCallback(`📥 Downloading: ${index + 1}/${files.length}...`);
-                const control = entry._cgptDownloadControl;
-                if (!control?.isConnected || control.disabled) {
-                    results.push({ filename: entry._cgptAttachment.filename, status: 'error', reason: '下载入口不可用，请刷新对话后再导出' });
-                    continue;
-                }
-                entry._cgptAttachment.downloaded_after = Date.now() / 1000;
-                entry._cgptAttachment.require_new_download = true;
-                control.click();
-                statusCallback(`📎 File: ${index + 1}/${files.length}...`);
-                // Finish each download before starting the next so different
-                // answers generating the same filename keep their own versions.
+                const file = entry._cgptAttachment;
                 try {
-                    const response = await requestHelper('POST', '/upload', { notion_token: token, files: [entry._cgptAttachment] });
+                    if (file.local_file || file.downloaded_after) {
+                        statusCallback(`📎 Checking: ${index + 1}/${files.length}...`);
+                        const checked = await requestHelper('POST', '/check', { notion_token: token, files: [file] });
+                        if (checked.results?.length !== 1 || checked.results[0].filename !== file.filename) throw new Error('本地附件服务返回的文件列表不完整');
+                        file.local_file = checked.results[0].local_file;
+                    }
+                    if (!file.local_file) {
+                        const control = entry._cgptDownloadControl;
+                        if (!control?.isConnected || control.disabled) throw new Error('下载入口不可用，请刷新对话后再导出');
+                        statusCallback(`📥 Downloading: ${index + 1}/${files.length}...`);
+                        file.downloaded_after = Date.now() / 1000;
+                        file.require_new_download = true;
+                        control.click();
+                    }
+                    statusCallback(`📎 Uploading: ${index + 1}/${files.length}...`);
+                    const response = await requestHelper('POST', '/upload', { notion_token: token, files: [file] });
                     if (!Array.isArray(response.results) || response.results.length !== 1) throw new Error('本地附件服务返回的文件列表不完整');
-                    results.push(response.results[0]);
+                    const result = response.results[0];
+                    if (result.filename !== file.filename) throw new Error('本地附件服务返回的文件名不匹配');
+                    // Keep the completed local copy even when Notion upload failed.
+                    if (result.local_file && entry._cgptDownloadKey) GM_setValue(entry._cgptDownloadKey, {
+                        started_at: file.downloaded_after, local_file: result.local_file
+                    });
+                    results.push(result);
                 } catch (error) {
                     results.push({ filename: entry._cgptAttachment.filename, status: 'error', reason: error.message });
                 }
@@ -3000,8 +3016,8 @@ function installNotionIntelligentUIHeight(expectedCount = 0, onComplete = () => 
                 splitIntelligentUIRoot(root, uiRoots.find(original => original.getAttribute('data-dil-message-id') === root.getAttribute('data-dil-message-id')));
             });
             children.push(...processNodesToBlocks(clone._cgptIntelligentUI ? [clone] : clone.childNodes, new Set()));
-            attachments.forEach(({ file, control }) => children.push({
-                ...attachmentNotice(file.filename, '等待下载和上传'), _cgptAttachment: file, _cgptDownloadControl: control
+            attachments.forEach(({ file, control, key }) => children.push({
+                ...attachmentNotice(file.filename, '等待下载和上传'), _cgptAttachment: file, _cgptDownloadControl: control, _cgptDownloadKey: key
             }));
             children.push({ object: "block", type: "divider", divider: {} });
         });

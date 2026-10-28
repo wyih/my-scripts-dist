@@ -245,12 +245,16 @@ window.__sourcesOpened = 0;
 window.__helperRequests = [];
 window.__helperEvents = [];
 window.__downloadClicks = [];
+window.__completedDownloads = {};
+window.__missingLocalFiles = new Set();
+window.__notionUploadFailure = false;
 document.addEventListener('click', event => {
   const control = event.target.closest?.('button[aria-label="下载文件"]');
   if (control) {
     const filename = control.closest('[class~="group/resource-row"]')?.querySelector('[title]')?.title;
     window.__downloadClicks.push(filename);
     window.__helperEvents.push('download:' + filename);
+    window.__completedDownloads[filename] = { filename: filename.replace(/(\.[^.]+)$/, ' (' + window.__downloadClicks.length + ')$1'), size_bytes: 123, mtime_ns: String(Date.now()) };
   }
 }, true);
 window.__helperOffline = false;
@@ -386,7 +390,17 @@ window.GM_xmlhttpRequest = (req) => {
   if (req.url === 'http://127.0.0.1:36678/health') {
     window.__helperEvents.push('health');
     if (window.__helperOffline) { req.onerror({}); return; }
-    req.onload({ status: 200, responseText: JSON.stringify({ service: 'chatgpt-notion-attachments', version: 2 }) });
+    req.onload({ status: 200, responseText: JSON.stringify({ service: 'chatgpt-notion-attachments', version: 3 }) });
+    return;
+  }
+  if (req.url === 'http://127.0.0.1:36678/check') {
+    window.__helperEvents.push('check');
+    const data = JSON.parse(req.data);
+    if (window.__helperOffline) { req.onerror({}); return; }
+    req.onload({ status: 200, responseText: JSON.stringify({ results: data.files.map(file => ({
+      filename: file.filename,
+      local_file: file.local_file && !window.__missingLocalFiles.has(file.local_file.filename) ? file.local_file : null
+    })) }) });
     return;
   }
   if (req.url === 'http://127.0.0.1:36678/upload') {
@@ -396,9 +410,10 @@ window.GM_xmlhttpRequest = (req) => {
     if (window.__helperOffline) { req.onerror({}); return; }
     req.onload({ status: 200, responseText: JSON.stringify({ results: data.files.map(file => ({
       filename: file.filename,
-      status: file.filename === 'large.pdf' ? 'skipped' : 'uploaded',
-      reason: file.filename === 'large.pdf' ? '超过自动上传大小限制（5 MiB）' : '',
-      file_upload_id: file.filename === 'large.pdf' ? '' : 'test-upload-id'
+      status: window.__notionUploadFailure ? 'error' : file.filename === 'large.pdf' ? 'skipped' : 'uploaded',
+      reason: window.__notionUploadFailure ? 'Notion 网络请求失败' : file.filename === 'large.pdf' ? '超过自动上传大小限制（5 MiB）' : '',
+      file_upload_id: file.filename === 'large.pdf' || window.__notionUploadFailure ? '' : 'test-upload-id',
+      local_file: file.local_file || window.__completedDownloads[file.filename]
     })) }) });
     return;
   }
@@ -834,6 +849,22 @@ function collectHeadings(blocks) {
       failures.push('full export should automatically download and upload attachments from each included answer');
     }
     if (fullAttachmentPayload.children.filter(block => block.file?.name === 'report.docx').length !== 2) failures.push('a shared attachment must remain under each included answer after download deduplication');
+    if (window.__downloadClicks.join(',') !== 'report.docx,large.pdf,other-reply.txt,report.docx') {
+      failures.push('repeat export must reuse completed files while another answer with the same filename downloads its own copy');
+    }
+    const reused = window.__helperRequests.slice(-4).flatMap(request => request.files);
+    if (!reused[0].local_file || !reused[1].local_file || reused[2].local_file || reused[3].local_file) failures.push('only previously downloaded answers should send exact local file receipts');
+    modernTurns[4].querySelector('[data-markdown-text-style]').insertAdjacentHTML('beforeend', downloadCard('retry.docx'));
+    window.__notionUploadFailure = true;
+    await exportBubble(modernTurns[4], '单条导出');
+    const clicksAfterFailure = window.__downloadClicks.length;
+    window.__notionUploadFailure = false;
+    const recovered = await exportBubble(modernTurns[4], '单条导出');
+    if (window.__downloadClicks.length !== clicksAfterFailure || !recovered.children.some(block => block.file?.name === 'retry.docx')) failures.push('an upload failure must retain the completed download and retry upload without another download');
+    const firstReport = window.__helperRequests.find(request => request.files[0].local_file?.filename.startsWith('report '))?.files[0].local_file;
+    window.__missingLocalFiles.add(firstReport?.filename);
+    await exportBubble(modernTurns[1], '单条导出');
+    if (window.__downloadClicks.length !== clicksAfterFailure + 1 || window.__downloadClicks.at(-1) !== 'report.docx') failures.push('a missing cached file must be downloaded again without redownloading intact siblings');
     modernTurns[1].querySelector('[title="切换隐私"]').click();
     const helperCount = window.__helperRequests.length;
     const downloadCount = window.__downloadClicks.length;
